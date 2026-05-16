@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -185,6 +186,7 @@ private fun StreamifyApp(
     var currentIndex by remember { mutableIntStateOf(-1) }
     var isPlaying by remember { mutableStateOf(false) }
     var activeTab by remember { mutableStateOf("Home") }
+    var tabBackStack by remember { mutableStateOf(emptyList<String>()) }
     var libraryFilter by remember { mutableStateOf("All") }
     var searchQuery by remember { mutableStateOf("") }
     var favoriteIds by remember { mutableStateOf(setOf<Int>()) }
@@ -273,6 +275,31 @@ private fun StreamifyApp(
     fun toggleRepeatOne() {
         repeatOne = !repeatOne
         getController()?.repeatMode = if (repeatOne) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    }
+
+    fun selectTab(tab: String) {
+        if (tab == activeTab) return
+        tabBackStack = (tabBackStack.filterNot { it == tab } + activeTab).takeLast(8)
+        activeTab = tab
+    }
+
+    BackHandler(
+        enabled = expandedPlayer ||
+            searchQuery.isNotBlank() ||
+            libraryFilter != "All" ||
+            tabBackStack.isNotEmpty() ||
+            activeTab != "Home"
+    ) {
+        when {
+            expandedPlayer -> expandedPlayer = false
+            searchQuery.isNotBlank() -> searchQuery = ""
+            activeTab == "Library" && libraryFilter != "All" -> libraryFilter = "All"
+            tabBackStack.isNotEmpty() -> {
+                activeTab = tabBackStack.last()
+                tabBackStack = tabBackStack.dropLast(1)
+            }
+            activeTab != "Home" -> activeTab = "Home"
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -456,7 +483,7 @@ private fun StreamifyApp(
                     }
                 }
             )
-            BottomNavigation(activeTab = activeTab, onTabSelected = { activeTab = it })
+            BottomNavigation(activeTab = activeTab, onTabSelected = { selectTab(it) })
         }
 
         currentSong?.let { expandedSong ->
