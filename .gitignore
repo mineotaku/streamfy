@@ -6,3 +6,27 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Android / Gradle generated output
+.gradle/
+android/.gradle/
+android/**/build/
+*.apk
+*.aab
+*.ap_
+
+# IDE and local machine state
+.idea/
+android/.idea/
+*.iml
+
+# Local Streamify library data
+streamify.db
+streamify.db-*
+art/
+artist-photos/
+music/
+
+# OS metadata
+Thumbs.db
+desktop.ini
