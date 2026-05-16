@@ -1,0 +1,6 @@
+{
+  "name": "Streamify MVP",
+  "description": "Local-only music streaming platform for high-quality audio distribution over Wi-Fi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
