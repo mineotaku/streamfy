@@ -23,9 +23,15 @@ android/.idea/
 # Local Streamify library data
 streamify.db
 streamify.db-*
+streamify-videos.db
+streamify-videos.db-*
 art/
 artist-photos/
 music/
+videos/*
+!videos/.gitkeep
+video-art/*
+!video-art/.gitkeep
 
 # OS metadata
 Thumbs.db

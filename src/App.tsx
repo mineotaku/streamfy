@@ -8,18 +8,89 @@ import {
   CheckCircle2, Headphones, Share2, Menu,
   Download, Info, Timer, SlidersHorizontal,
   Radio, Mic2, Gauge, X, Volume1, RotateCcw,
-  Clock3, Sparkles
+  Clock3, Sparkles, GripVertical, Trash2, Pencil,
+  Disc3, UserRound, BarChart3, Wrench, Users,
+  Keyboard, Upload, FileText, ShieldCheck, Minimize2,
+  AudioLines, BadgeInfo, QrCode, Clapperboard, Tv
+  , Rewind, FastForward, Languages, Sun, Subtitles, PictureInPicture2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Song, PlayerState, Artist, Album, Genre, Playlist } from './types';
+import { Song, PlayerState, Artist, Album, Genre, Playlist, VideoEpisode, VideoSeason, VideoSeries } from './types';
+
+async function readJsonResponse<T>(response: Response, label: string): Promise<T> {
+  const contentType = response.headers.get('content-type') || '';
+  const body = await response.text();
+
+  if (!contentType.includes('application/json')) {
+    const htmlHint = body.trimStart().startsWith('<')
+      ? 'Received the app shell instead of API JSON. Restart the Streamify server so the latest API routes are active.'
+      : body.slice(0, 160);
+    throw new Error(`${label} returned ${response.status} ${response.statusText || ''}. ${htmlHint}`.trim());
+  }
+
+  const data = JSON.parse(body) as T;
+  if (!response.ok) {
+    const message = data && typeof data === 'object' && 'error' in data ? String((data as { error?: unknown }).error) : response.statusText;
+    throw new Error(`${label} failed: ${message || response.status}`);
+  }
+
+  return data;
+}
+
+const AUDIO_PLAYBACK_KEY = 'streamify.playback.audio.v1';
+const VIDEO_PLAYBACK_KEY = 'streamify.playback.video.v1';
+
+type SavedAudioPlayback = {
+  songId: number;
+  currentTime: number;
+  queueIds: number[];
+  volume: number;
+  playbackSpeed: number;
+  savedAt: number;
+};
+
+type SavedVideoPlayback = {
+  episodeId: number;
+  currentTime: number;
+  duration: number;
+  volume: number;
+  brightness: number;
+  playbackRate: number;
+  savedAt: number;
+};
+
+function readStoredJson<T>(key: string): T | null {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) as T : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
 
 export default function App() {
+  const eqPresets: Record<string, Record<string, number>> = {
+    Flat: { '60Hz': 0, '170Hz': 0, '310Hz': 0, '600Hz': 0, '1kHz': 0, '3kHz': 0, '6kHz': 0, '12kHz': 0, '14kHz': 0, '16kHz': 0 },
+    'Bass Boost': { '60Hz': 7, '170Hz': 5, '310Hz': 3, '600Hz': 0, '1kHz': 0, '3kHz': 0, '6kHz': 1, '12kHz': 2, '14kHz': 2, '16kHz': 1 },
+    'Vocal Clarity': { '60Hz': -2, '170Hz': -1, '310Hz': 1, '600Hz': 3, '1kHz': 5, '3kHz': 5, '6kHz': 3, '12kHz': 1, '14kHz': 0, '16kHz': 0 },
+    'Night Mode': { '60Hz': -4, '170Hz': -2, '310Hz': 0, '600Hz': 1, '1kHz': 1, '3kHz': 1, '6kHz': -1, '12kHz': -3, '14kHz': -4, '16kHz': -4 },
+    Acoustic: { '60Hz': 2, '170Hz': 2, '310Hz': 1, '600Hz': 2, '1kHz': 2, '3kHz': 3, '6kHz': 2, '12kHz': 1, '14kHz': 1, '16kHz': 0 },
+    'Treble Boost': { '60Hz': -2, '170Hz': -1, '310Hz': 0, '600Hz': 0, '1kHz': 1, '3kHz': 3, '6kHz': 5, '12kHz': 6, '14kHz': 6, '16kHz': 5 },
+    Podcast: { '60Hz': -5, '170Hz': -2, '310Hz': 1, '600Hz': 3, '1kHz': 5, '3kHz': 4, '6kHz': 1, '12kHz': -2, '14kHz': -3, '16kHz': -4 },
+    Custom: { '60Hz': 0, '170Hz': 0, '310Hz': 0, '600Hz': 0, '1kHz': 0, '3kHz': 0, '6kHz': 0, '12kHz': 0, '14kHz': 0, '16kHz': 0 },
+  };
   const [songs, setSongs] = useState<Song[]>([]);
   const [artists, setArtists] = useState<Artist[]>([]);
   const [albums, setAlbums] = useState<Album[]>([]);
   const [genres, setGenres] = useState<Genre[]>([]);
   
-  const [activeView, setActiveView] = useState<'home' | 'library'>('home');
+  const [activeView, setActiveView] = useState<'home' | 'library' | 'videos'>('home');
   const [libraryTab, setLibraryTab] = useState<'songs' | 'artists' | 'albums' | 'genres'>('songs');
   const [selectedFilter, setSelectedFilter] = useState<{ type: string, id: number, name: string } | null>(null);
 
@@ -28,6 +99,10 @@ export default function App() {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [showPlaylistModal, setShowPlaylistModal] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [playlistDraftName, setPlaylistDraftName] = useState('');
+  const [smartQueue, setSmartQueue] = useState<Song[]>([]);
+  const [draggedQueueIndex, setDraggedQueueIndex] = useState<number | null>(null);
+  const [draggedPlaylistIndex, setDraggedPlaylistIndex] = useState<number | null>(null);
 
   const [playerState, setPlayerState] = useState<PlayerState>({
     currentSong: null,
@@ -50,6 +125,13 @@ export default function App() {
   const [showQueueSheet, setShowQueueSheet] = useState(false);
   const [showSettingsSheet, setShowSettingsSheet] = useState(false);
   const [showActionsSheet, setShowActionsSheet] = useState(false);
+  const [actionSong, setActionSong] = useState<Song | null>(null);
+  const [showStatsSheet, setShowStatsSheet] = useState(false);
+  const [showToolsSheet, setShowToolsSheet] = useState(false);
+  const [showMetadataSheet, setShowMetadataSheet] = useState(false);
+  const [showSongCreditsSheet, setShowSongCreditsSheet] = useState(false);
+  const [showSpotifyCodeSheet, setShowSpotifyCodeSheet] = useState(false);
+  const [showMiniPlayer, setShowMiniPlayer] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(0.7);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -59,17 +141,59 @@ export default function App() {
   const [autoplayNext, setAutoplayNext] = useState(true);
   const [showVisualizer, setShowVisualizer] = useState(true);
   const [losslessMode, setLosslessMode] = useState(false);
+  const [eqPreset, setEqPreset] = useState('Flat');
+  const [eqBands, setEqBands] = useState<Record<string, number>>({
+    '60Hz': 0, '170Hz': 0, '310Hz': 0, '600Hz': 0, '1kHz': 0,
+    '3kHz': 0, '6kHz': 0, '12kHz': 0, '14kHz': 0, '16kHz': 0
+  });
+  const [theme, setTheme] = useState({ primary: '#1ed760', secondary: '#408da3', accent: '#ffffff', background: '#121212', text: '#ffffff' });
+  const [stats, setStats] = useState<any | null>(null);
+  const [duplicates, setDuplicates] = useState<any[]>([]);
+  const [health, setHealth] = useState<any | null>(null);
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [mixes, setMixes] = useState<any[]>([]);
+  const [metadataDraft, setMetadataDraft] = useState<Record<string, any>>({});
+  const [videoSeries, setVideoSeries] = useState<VideoSeries[]>([]);
+  const [videoLoading, setVideoLoading] = useState(false);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [selectedVideoSeries, setSelectedVideoSeries] = useState<VideoSeries | null>(null);
+  const [selectedVideoSeason, setSelectedVideoSeason] = useState<VideoSeason | null>(null);
+  const [selectedVideoEpisode, setSelectedVideoEpisode] = useState<VideoEpisode | null>(null);
+  const [audioResumeRestored, setAudioResumeRestored] = useState(false);
   const sleepTimeoutRef = useRef<number | null>(null);
   const playerStateRef = useRef<PlayerState>(playerState);
   const songsRef = useRef<Song[]>([]);
   const autoplayNextRef = useRef(autoplayNext);
+  const smartQueueRef = useRef<Song[]>([]);
+  const volumeRef = useRef(volume);
+  const isMutedRef = useRef(isMuted);
+  const playbackSpeedRef = useRef(playbackSpeed);
+  const crossfadeRef = useRef(crossfade);
+  const secondaryAudioRef = useRef<HTMLAudioElement | null>(null);
+  const preparedNextRef = useRef<{ songId: number, src: string } | null>(null);
+  const transitionInProgressRef = useRef(false);
+  const fadeFrameRef = useRef<number | null>(null);
+  const websocketRef = useRef<WebSocket | null>(null);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
+  const eqFilterRefs = useRef<BiquadFilterNode[]>([]);
   const animationFrameRef = useRef<number | null>(null);
   const [visualizerData, setVisualizerData] = useState<Uint8Array | null>(null);
+
+  const saveAudioPlayback = (audio = audioRef.current, state = playerStateRef.current) => {
+    if (!audio || !state.currentSong) return;
+    writeStoredJson(AUDIO_PLAYBACK_KEY, {
+      songId: state.currentSong.id,
+      currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
+      queueIds: state.queue.map(song => song.id),
+      volume: volumeRef.current,
+      playbackSpeed: playbackSpeedRef.current,
+      savedAt: Date.now(),
+    } satisfies SavedAudioPlayback);
+  };
 
   useEffect(() => {
     playerStateRef.current = playerState;
@@ -80,8 +204,65 @@ export default function App() {
   }, [songs]);
 
   useEffect(() => {
+    if (audioResumeRestored || songs.length === 0 || !audioRef.current) return;
+    const saved = readStoredJson<SavedAudioPlayback>(AUDIO_PLAYBACK_KEY);
+    if (!saved?.songId) {
+      setAudioResumeRestored(true);
+      return;
+    }
+    const song = songs.find(item => item.id === saved.songId);
+    if (!song) {
+      setAudioResumeRestored(true);
+      return;
+    }
+    const queue = saved.queueIds
+      .map(id => songs.find(item => item.id === id))
+      .filter((item): item is Song => Boolean(item));
+    const nextQueue = queue.length > 0 ? queue : [song];
+    const currentIndex = Math.max(nextQueue.findIndex(item => item.id === song.id), 0);
+    const audio = audioRef.current;
+    audio.src = `/api/stream/${song.id}`;
+    audio.volume = saved.volume ?? volumeRef.current;
+    audio.playbackRate = saved.playbackSpeed ?? playbackSpeedRef.current;
+    audio.addEventListener('loadedmetadata', () => {
+      audio.currentTime = Math.min(saved.currentTime || 0, Math.max(audio.duration - 2, 0));
+    }, { once: true });
+    setVolume(saved.volume ?? volumeRef.current);
+    setPlaybackSpeed(saved.playbackSpeed ?? playbackSpeedRef.current);
+    setPlayerState(prev => ({
+      ...prev,
+      currentSong: song,
+      queue: nextQueue,
+      currentIndex,
+      isPlaying: false,
+      progress: song.duration ? ((saved.currentTime || 0) / song.duration) * 100 : 0,
+    }));
+    setAudioResumeRestored(true);
+  }, [songs, audioResumeRestored]);
+
+  useEffect(() => {
     autoplayNextRef.current = autoplayNext;
   }, [autoplayNext]);
+
+  useEffect(() => {
+    smartQueueRef.current = smartQueue;
+  }, [smartQueue]);
+
+  useEffect(() => {
+    volumeRef.current = volume;
+  }, [volume]);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
+
+  useEffect(() => {
+    playbackSpeedRef.current = playbackSpeed;
+  }, [playbackSpeed]);
+
+  useEffect(() => {
+    crossfadeRef.current = crossfade;
+  }, [crossfade]);
 
   useEffect(() => {
     if (audioRef.current) {
@@ -97,18 +278,49 @@ export default function App() {
     }
   }, [audioBoost, normalizeAudio]);
 
+  useEffect(() => {
+    eqFilterRefs.current.forEach((filter, index) => {
+      const key = Object.keys(eqBands)[index];
+      if (key) filter.gain.setTargetAtTime(eqBands[key], audioContextRef.current?.currentTime || 0, 0.015);
+    });
+  }, [eqBands]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty('--dynamic-primary', theme.primary);
+    document.documentElement.style.setProperty('--dynamic-secondary', theme.secondary);
+    document.documentElement.style.setProperty('--dynamic-bg', theme.background);
+  }, [theme]);
+
+  useEffect(() => {
+    if (playerState.currentSong?.coverArtPath) {
+      extractTheme(playerState.currentSong.coverArtPath);
+    }
+  }, [playerState.currentSong?.coverArtPath]);
+
   const initAudioContext = () => {
     if (!audioContextRef.current && audioRef.current) {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const context = new AudioContextClass();
       const analyser = context.createAnalyser();
       const gain = context.createGain();
+      const frequencies = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
+      const filters = frequencies.map((frequency) => {
+        const filter = context.createBiquadFilter();
+        filter.type = 'peaking';
+        filter.frequency.value = frequency;
+        filter.Q.value = 1;
+        return filter;
+      });
       const boostGain = Math.pow(10, audioBoost / 20);
       gain.gain.value = normalizeAudio ? Math.min(boostGain, 1.5) : boostGain;
       analyser.fftSize = 128; // Smaller for smoother visualizer
       
       const source = context.createMediaElementSource(audioRef.current);
-      source.connect(analyser);
+      source.connect(filters[0]);
+      filters.forEach((filter, index) => {
+        filter.gain.value = eqBands[Object.keys(eqBands)[index]] || 0;
+        filter.connect(filters[index + 1] || analyser);
+      });
       analyser.connect(gain);
       gain.connect(context.destination);
       
@@ -116,6 +328,7 @@ export default function App() {
       analyserRef.current = analyser;
       sourceRef.current = source;
       gainRef.current = gain;
+      eqFilterRefs.current = filters;
       
       const bufferLength = analyser.frequencyBinCount;
       const dataArray = new Uint8Array(bufferLength);
@@ -142,9 +355,39 @@ export default function App() {
     }
   }, [playerState.currentIndex]);
 
+  const getPreparedCandidate = (state = playerStateRef.current) => {
+    if (!state.currentSong) return null;
+    if (state.repeatMode === 'one') return state.currentSong;
+    if (state.currentIndex >= 0 && state.currentIndex < state.queue.length - 1) {
+      return state.queue[state.currentIndex + 1];
+    }
+    if (state.repeatMode === 'all' && state.queue.length > 0) {
+      return state.queue[0];
+    }
+    if (!autoplayNextRef.current) return null;
+    return smartQueueRef.current.find(song => song.id !== state.currentSong?.id) || null;
+  };
+
+  const prepareUpcomingSong = (song?: Song | null) => {
+    const nextAudio = secondaryAudioRef.current;
+    if (!nextAudio || !song) return;
+    const src = `/api/stream/${song.id}`;
+    if (preparedNextRef.current?.songId === song.id && nextAudio.src.includes(src)) return;
+    nextAudio.pause();
+    nextAudio.src = src;
+    nextAudio.preload = 'auto';
+    nextAudio.volume = 0;
+    nextAudio.muted = isMutedRef.current;
+    nextAudio.playbackRate = playbackSpeedRef.current;
+    nextAudio.load();
+    preparedNextRef.current = { songId: song.id, src };
+  };
+
   useEffect(() => {
     if (playerState.currentSong) {
       fetchLyrics(playerState.currentSong.id);
+      fetchSmartQueue(playerState.currentSong.id, 12);
+      prepareUpcomingSong(getPreparedCandidate());
     }
   }, [playerState.currentSong]);
 
@@ -185,6 +428,7 @@ export default function App() {
     if (audioRef.current) {
       const newMute = !isMuted;
       audioRef.current.muted = newMute;
+      if (secondaryAudioRef.current) secondaryAudioRef.current.muted = newMute;
       setIsMuted(newMute);
     }
   };
@@ -196,7 +440,52 @@ export default function App() {
       audioRef.current.volume = newVal;
       setIsMuted(newVal === 0);
     }
+    if (secondaryAudioRef.current && !transitionInProgressRef.current) {
+      secondaryAudioRef.current.volume = 0;
+    }
     setPlayerState(prev => ({ ...prev, volume: newVal }));
+  };
+
+  const buildRecommendationUrl = (currentId?: number | null, limit = 20) => {
+    const now = new Date();
+    const params = new URLSearchParams({
+      limit: String(limit),
+      hour: String(now.getHours()),
+      dayOfWeek: String(now.getDay()),
+    });
+    if (currentId) params.set('currentId', String(currentId));
+    return `/api/recommendations?${params.toString()}`;
+  };
+
+  const fetchSmartQueue = async (currentId?: number | null, limit = 20) => {
+    try {
+      const res = await fetch(buildRecommendationUrl(currentId, limit));
+      if (!res.ok) throw new Error(`Recommendations request failed: ${res.status}`);
+      const data = await res.json();
+      setSmartQueue(data);
+      smartQueueRef.current = data;
+      prepareUpcomingSong(getPreparedCandidate());
+      return data as Song[];
+    } catch (error) {
+      console.error('Failed to fetch smart queue:', error);
+      return [];
+    }
+  };
+
+  const startSmartQueue = async () => {
+    const recommendations = await fetchSmartQueue(playerState.currentSong?.id, 25);
+    if (recommendations.length === 0) return;
+    setPlayerState(prev => ({ ...prev, shuffle: false }));
+    playSong(recommendations[0], recommendations);
+  };
+
+  const playAutoplayRecommendations = async (currentId?: number) => {
+    const recommendations = await fetchSmartQueue(currentId, 20);
+    if (recommendations.length === 0) {
+      setPlayerState(prev => ({ ...prev, isPlaying: false, progress: 0 }));
+      return;
+    }
+    playSong(recommendations[0], recommendations);
   };
 
   const shuffleQueue = () => {
@@ -236,6 +525,59 @@ export default function App() {
     });
   };
 
+  const applyEqPreset = (name: string) => {
+    const nextBands = eqPresets[name] || eqPresets.Flat;
+    setEqPreset(name);
+    setEqBands(nextBands);
+    fetch('/api/eq-presets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId: 1, name, bands: nextBands })
+    }).catch(() => {});
+  };
+
+  const extractTheme = (imageUrl: string) => {
+    const cacheKey = `palette:${imageUrl}`;
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) {
+      setTheme(JSON.parse(cached));
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const size = 48;
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, size, size);
+      const pixels = ctx.getImageData(0, 0, size, size).data;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let i = 0; i < pixels.length; i += 16) {
+        const alpha = pixels[i + 3];
+        if (alpha < 128) continue;
+        r += pixels[i];
+        g += pixels[i + 1];
+        b += pixels[i + 2];
+        count++;
+      }
+      if (!count) return;
+      const primary = rgbToHex(Math.round(r / count), Math.round(g / count), Math.round(b / count));
+      const nextTheme = {
+        primary,
+        secondary: shiftColor(primary, 28),
+        accent: contrastColor(primary),
+        background: shiftColor(primary, -70),
+        text: contrastColor(primary),
+      };
+      localStorage.setItem(cacheKey, JSON.stringify(nextTheme));
+      setTheme(nextTheme);
+    };
+    img.src = imageUrl;
+  };
+
   useEffect(() => {
     fetchAllData();
     
@@ -243,47 +585,131 @@ export default function App() {
     if (!audioRef.current) {
       audioRef.current = new Audio();
     }
+    if (!secondaryAudioRef.current) {
+      secondaryAudioRef.current = new Audio();
+    }
     
-    const audio = audioRef.current;
+    const primaryAudio = audioRef.current;
+    const secondaryAudio = secondaryAudioRef.current;
     
-    const handleTimeUpdate = () => {
+    const handleTimeUpdate = (event: Event) => {
+      const audio = event.currentTarget as HTMLAudioElement;
+      if (audio !== audioRef.current) return;
       setPlayerState(prev => ({
         ...prev,
         progress: (audio.currentTime / audio.duration) * 100 || 0
       }));
+      saveAudioPlayback(audio);
+
+      const latest = playerStateRef.current;
+      const remaining = audio.duration - audio.currentTime;
+      if (
+        latest.isPlaying &&
+        latest.repeatMode !== 'one' &&
+        Number.isFinite(remaining) &&
+        remaining <= Math.max(0.4, crossfadeRef.current) &&
+        !transitionInProgressRef.current
+      ) {
+        const nextSong = getPreparedCandidate(latest);
+        if (nextSong) {
+          void crossfadeToSong(nextSong, { advanceQueue: true, fromAutoplay: latest.currentIndex >= latest.queue.length - 1 });
+        }
+      }
     };
     
-    const handleEnded = () => {
+    const handleEnded = (event: Event) => {
+      if (event.currentTarget !== audioRef.current || transitionInProgressRef.current) return;
       const latest = playerStateRef.current;
       if (latest.repeatMode === 'one') {
+        const audio = audioRef.current;
+        if (!audio) return;
         audio.currentTime = 0;
         audio.play().catch(() => {
           setPlayerState(prev => ({ ...prev, isPlaying: false }));
         });
       } else if (latest.currentIndex < latest.queue.length - 1) {
         const nextIndex = latest.currentIndex + 1;
-        playSong(latest.queue[nextIndex]);
-        setPlayerState(prev => ({ ...prev, currentIndex: nextIndex }));
+        playSong(latest.queue[nextIndex], latest.queue);
       } else if (latest.repeatMode === 'all' && latest.queue.length > 0) {
-        playSong(latest.queue[0]);
-        setPlayerState(prev => ({ ...prev, currentIndex: 0 }));
+        playSong(latest.queue[0], latest.queue);
       } else if (autoplayNextRef.current && songsRef.current.length > 0) {
-        const randomSong = songsRef.current[Math.floor(Math.random() * songsRef.current.length)];
-        playSong(randomSong, songsRef.current);
+        void playAutoplayRecommendations(latest.currentSong?.id);
       } else {
         setPlayerState(prev => ({ ...prev, isPlaying: false, progress: 0 }));
       }
     };
 
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('ended', handleEnded);
+    primaryAudio.addEventListener('timeupdate', handleTimeUpdate);
+    primaryAudio.addEventListener('ended', handleEnded);
+    secondaryAudio.addEventListener('timeupdate', handleTimeUpdate);
+    secondaryAudio.addEventListener('ended', handleEnded);
     
     return () => {
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('ended', handleEnded);
+      primaryAudio.removeEventListener('timeupdate', handleTimeUpdate);
+      primaryAudio.removeEventListener('ended', handleEnded);
+      secondaryAudio.removeEventListener('timeupdate', handleTimeUpdate);
+      secondaryAudio.removeEventListener('ended', handleEnded);
+      if (fadeFrameRef.current) cancelAnimationFrame(fadeFrameRef.current);
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       if (sleepTimeoutRef.current) window.clearTimeout(sleepTimeoutRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+    websocketRef.current = socket;
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'remote:command') {
+          const command = message.payload?.command;
+          if (command === 'toggle') togglePlay();
+          if (command === 'next') playNext();
+          if (command === 'previous') playPrev();
+          if (command === 'volume') {
+            const value = Math.min(Math.max(Number(message.payload.value), 0), 1);
+            setVolume(value);
+            if (audioRef.current) audioRef.current.volume = value;
+          }
+        }
+      } catch {}
+    };
+    return () => socket.close();
+  }, []);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const editing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA';
+      if (editing && event.key !== 'Escape') return;
+      if (event.key === ' ') {
+        event.preventDefault();
+        togglePlay();
+      } else if (event.key === 'ArrowRight') {
+        seekToProgress(Math.min(playerStateRef.current.progress + 5, 100));
+      } else if (event.key === 'ArrowLeft') {
+        seekToProgress(Math.max(playerStateRef.current.progress - 5, 0));
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setVolume(prev => Math.min(prev + 0.05, 1));
+      } else if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setVolume(prev => Math.max(prev - 0.05, 0));
+      } else if (event.key.toLowerCase() === 'f' && playerStateRef.current.currentSong) {
+        toggleFavorite(playerStateRef.current.currentSong.id, !!playerStateRef.current.currentSong.isFavorite);
+      } else if (event.key === '/') {
+        event.preventDefault();
+        document.getElementById('global-search')?.focus();
+      } else if (event.ctrlKey && event.key.toLowerCase() === 'l') {
+        setShowLyrics(prev => !prev);
+        setIsExpandedPlayer(true);
+      } else if (event.ctrlKey && event.key.toLowerCase() === 'k') {
+        setShowToolsSheet(true);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   }, []);
 
   // Update Media Session when song changes
@@ -313,7 +739,8 @@ export default function App() {
         fetchArtists(),
         fetchAlbums(),
         fetchGenres(),
-        fetchPlaylists()
+        fetchPlaylists(),
+        fetchDashboardData()
       ]);
     } catch (error) {
       console.error('Failed to fetch data:', error);
@@ -324,6 +751,90 @@ export default function App() {
   const fetchPlaylists = async () => {
     const res = await fetch('/api/playlists');
     setPlaylists(await res.json());
+  };
+
+  const fetchDashboardData = async () => {
+    try {
+      const [statsRes, duplicatesRes, healthRes, profilesRes, mixesRes] = await Promise.all([
+        fetch('/api/stats/overview'),
+        fetch('/api/duplicates'),
+        fetch('/api/library/health'),
+        fetch('/api/profiles'),
+        fetch('/api/mixes'),
+      ]);
+      setStats(await statsRes.json());
+      setDuplicates((await duplicatesRes.json()).duplicates || []);
+      setHealth(await healthRes.json());
+      setProfiles(await profilesRes.json());
+      setMixes(await mixesRes.json());
+    } catch (error) {
+      console.error('Failed to fetch dashboard data:', error);
+    }
+  };
+
+  const fetchVideoSeries = async () => {
+    setVideoLoading(true);
+    setVideoError(null);
+    try {
+      const response = await fetch('/api/videos/series?scan=false');
+      const data = await readJsonResponse<VideoSeries[]>(response, 'Videos request');
+      setVideoSeries(data);
+      const latest = readStoredJson<{ episodeId: number }>(`${VIDEO_PLAYBACK_KEY}.latest`);
+      if (latest?.episodeId && !selectedVideoEpisode) {
+        for (const series of data) {
+          for (const season of series.seasons) {
+            const episode = season.episodes.find(item => item.id === latest.episodeId);
+            if (episode) {
+              setSelectedVideoSeries(series);
+              setSelectedVideoSeason(season);
+              setSelectedVideoEpisode(episode);
+              return;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch videos:', error);
+      setVideoError(error instanceof Error ? error.message : 'Could not load videos');
+    } finally {
+      setVideoLoading(false);
+    }
+  };
+
+  const scanVideoSeries = async () => {
+    setVideoLoading(true);
+    setVideoError(null);
+    try {
+      const scanResponse = await fetch('/api/videos/scan', { method: 'POST' });
+      await readJsonResponse(scanResponse, 'Video scan');
+      const response = await fetch('/api/videos/series?scan=false');
+      const data = await readJsonResponse<VideoSeries[]>(response, 'Videos request');
+      setVideoSeries(data);
+    } catch (error) {
+      console.error('Failed to scan videos:', error);
+      setVideoError(error instanceof Error ? error.message : 'Could not scan videos');
+    } finally {
+      setVideoLoading(false);
+    }
+  };
+
+  const updateVideoSeries = async (series: VideoSeries, changes: { title: string; posterPath?: string | null }) => {
+    const response = await fetch(`/api/videos/series/${series.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(changes),
+    });
+    const data = await readJsonResponse<{ series: VideoSeries }>(response, 'Rename series');
+    setVideoSeries(current => current.map(item => item.id === data.series.id ? data.series : item));
+    setSelectedVideoSeries(current => current?.id === data.series.id ? data.series : current);
+  };
+
+  const openVideos = async () => {
+    setActiveView('videos');
+    setSelectedFilter(null);
+    if (videoSeries.length === 0) {
+      await fetchVideoSeries();
+    }
   };
 
   const toggleFavorite = async (songId: number, currentFavorite: boolean) => {
@@ -379,6 +890,106 @@ export default function App() {
     }
   };
 
+  const openMetadataEditor = (song: Song) => {
+    setMetadataDraft({
+      id: song.id,
+      title: song.title,
+      artist: song.artist,
+      album: song.album,
+      albumArtist: song.albumArtist || '',
+      genre: song.genre || '',
+      year: song.year || '',
+      trackNumber: song.trackNumber || '',
+      discNumber: song.discNumber || '',
+      composer: song.composer || '',
+    });
+    setShowMetadataSheet(true);
+  };
+
+  const saveMetadata = async () => {
+    if (!metadataDraft.id) return;
+    try {
+      const res = await fetch(`/api/songs/${metadataDraft.id}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(metadataDraft)
+      });
+      if (!res.ok) throw new Error(`Metadata save failed: ${res.status}`);
+      await fetchSongs();
+      await fetchArtists();
+      await fetchAlbums();
+      await fetchGenres();
+      setShowMetadataSheet(false);
+    } catch (error) {
+      console.error('Failed to save metadata:', error);
+    }
+  };
+
+  const renamePlaylist = async () => {
+    if (selectedFilter?.type !== 'playlist' || !playlistDraftName.trim()) return;
+    try {
+      const res = await fetch(`/api/playlists/${selectedFilter.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: playlistDraftName.trim() })
+      });
+      if (!res.ok) throw new Error(`Rename failed: ${res.status}`);
+      setSelectedFilter(prev => prev ? { ...prev, name: playlistDraftName.trim() } : prev);
+      await fetchPlaylists();
+    } catch (error) {
+      console.error('Failed to rename playlist:', error);
+    }
+  };
+
+  const removeSongFromPlaylist = async (songId: number) => {
+    if (selectedFilter?.type !== 'playlist') return;
+    try {
+      const res = await fetch(`/api/playlists/${selectedFilter.id}/songs/${songId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`Remove failed: ${res.status}`);
+      setSongs(prev => prev.filter(song => song.id !== songId));
+    } catch (error) {
+      console.error('Failed to remove song from playlist:', error);
+    }
+  };
+
+  const persistPlaylistOrder = async (orderedSongs: Song[]) => {
+    if (selectedFilter?.type !== 'playlist') return;
+    try {
+      await fetch(`/api/playlists/${selectedFilter.id}/reorder`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ songIds: orderedSongs.map(song => song.id) })
+      });
+    } catch (error) {
+      console.error('Failed to reorder playlist:', error);
+    }
+  };
+
+  const movePlaylistSong = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
+    setSongs(prev => {
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      if (!moved) return prev;
+      next.splice(toIndex, 0, moved);
+      void persistPlaylistOrder(next);
+      return next;
+    });
+  };
+
+  const moveQueueSong = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
+    setPlayerState(prev => {
+      const current = prev.currentSong;
+      const next = [...prev.queue];
+      const [moved] = next.splice(fromIndex, 1);
+      if (!moved) return prev;
+      next.splice(toIndex, 0, moved);
+      const currentIndex = current ? next.findIndex(song => song.id === current.id) : prev.currentIndex;
+      return { ...prev, queue: next, currentIndex };
+    });
+  };
+
   const fetchPlaylistSongs = async (playlistId: number, playlistName: string) => {
     setLoading(true);
     try {
@@ -386,7 +997,9 @@ export default function App() {
       const data = await res.json();
       setSongs(data);
       setSelectedFilter({ type: 'playlist', id: playlistId, name: playlistName });
+      setPlaylistDraftName(playlistName);
       setLibraryTab('songs');
+      setActiveView('library');
     } catch (error) {
       console.error('Failed to fetch playlist songs:', error);
     }
@@ -439,17 +1052,91 @@ export default function App() {
 
   const applyFilter = (type: string, id: number, name: string) => {
     setSelectedFilter({ type, id, name });
+    setPlaylistDraftName('');
     const filters: any = {};
     if (type === 'artist') filters.artistId = id;
     if (type === 'album') filters.albumId = id;
     if (type === 'genre') filters.genreId = id;
     fetchSongs(filters);
     setLibraryTab('songs');
+    setActiveView('library');
   };
 
   const clearFilter = () => {
     setSelectedFilter(null);
+    setPlaylistDraftName('');
     fetchSongs();
+  };
+
+  const crossfadeToSong = async (song: Song, options: { advanceQueue?: boolean, fromAutoplay?: boolean } = {}) => {
+    const currentAudio = audioRef.current;
+    const nextAudio = secondaryAudioRef.current;
+    const fadeSeconds = crossfadeRef.current;
+    if (!currentAudio || !nextAudio || transitionInProgressRef.current || fadeSeconds <= 0 || !playerStateRef.current.currentSong) {
+      return false;
+    }
+
+    transitionInProgressRef.current = true;
+    const nextSrc = `/api/stream/${song.id}`;
+    if (preparedNextRef.current?.songId !== song.id || !nextAudio.src.includes(nextSrc)) {
+      nextAudio.src = nextSrc;
+      nextAudio.load();
+      preparedNextRef.current = { songId: song.id, src: nextSrc };
+    }
+    nextAudio.volume = 0;
+    nextAudio.muted = isMutedRef.current;
+    nextAudio.playbackRate = playbackSpeedRef.current;
+    try {
+      await nextAudio.play();
+    } catch (error) {
+      transitionInProgressRef.current = false;
+      throw error;
+    }
+
+    const durationMs = Math.max(250, fadeSeconds * 1000);
+    const startedAt = performance.now();
+    const startVolume = currentAudio.volume || volumeRef.current;
+    const fade = (now: number) => {
+      const progress = Math.min((now - startedAt) / durationMs, 1);
+      currentAudio.volume = startVolume * (1 - progress);
+      nextAudio.volume = volumeRef.current * progress;
+      if (progress < 1) {
+        fadeFrameRef.current = requestAnimationFrame(fade);
+      } else {
+        currentAudio.pause();
+        currentAudio.removeAttribute('src');
+        currentAudio.load();
+        nextAudio.volume = volumeRef.current;
+        audioRef.current = nextAudio;
+        secondaryAudioRef.current = currentAudio;
+        preparedNextRef.current = null;
+        transitionInProgressRef.current = false;
+        fadeFrameRef.current = null;
+        if (options.advanceQueue) {
+          setPlayerState(prev => {
+            const queueIndex = prev.queue.findIndex(item => item.id === song.id);
+            const nextIndex = queueIndex >= 0 ? queueIndex : 0;
+            const nextQueue = queueIndex >= 0 ? prev.queue : [song, ...smartQueueRef.current.filter(item => item.id !== song.id)];
+            return {
+              ...prev,
+              queue: nextQueue,
+              currentIndex: nextIndex,
+              currentSong: song,
+              isPlaying: true,
+              progress: (nextAudio.currentTime / nextAudio.duration) * 100 || 0
+            };
+          });
+          trackPlay(song.id);
+        }
+        prepareUpcomingSong(getPreparedCandidate({
+          ...playerStateRef.current,
+          currentSong: song,
+          currentIndex: options.fromAutoplay ? 0 : Math.max(playerStateRef.current.queue.findIndex(item => item.id === song.id), 0),
+        }));
+      }
+    };
+    fadeFrameRef.current = requestAnimationFrame(fade);
+    return true;
   };
 
   const playSong = (song: Song, newQueue?: Song[]) => {
@@ -476,13 +1163,44 @@ export default function App() {
     }
 
     trackPlay(song.id);
-    audio.src = `/api/stream/${song.id}`;
-    audio.volume = volume;
-    audio.muted = isMuted;
-    audio.playbackRate = playbackSpeed;
-    audio.play().catch(() => {
-      setPlayerState(prev => ({ ...prev, isPlaying: false }));
-    });
+    const shouldCrossfade = Boolean(playerStateRef.current.currentSong && playerStateRef.current.isPlaying && audio.src);
+    if (shouldCrossfade) {
+      void crossfadeToSong(song).then((started) => {
+        if (started) return;
+        audio.src = `/api/stream/${song.id}`;
+        audio.volume = volumeRef.current;
+        audio.muted = isMutedRef.current;
+        audio.playbackRate = playbackSpeedRef.current;
+        audio.play().catch(() => {
+          setPlayerState(prev => ({ ...prev, isPlaying: false }));
+        });
+      }).catch(() => {
+        transitionInProgressRef.current = false;
+        audio.src = `/api/stream/${song.id}`;
+        audio.volume = volumeRef.current;
+        audio.muted = isMutedRef.current;
+        audio.playbackRate = playbackSpeedRef.current;
+        audio.play().catch(() => {
+          setPlayerState(prev => ({ ...prev, isPlaying: false }));
+        });
+      });
+    } else {
+      audio.src = `/api/stream/${song.id}`;
+      audio.volume = volumeRef.current;
+      audio.muted = isMutedRef.current;
+      audio.playbackRate = playbackSpeedRef.current;
+      audio.play().catch(() => {
+        setPlayerState(prev => ({ ...prev, isPlaying: false }));
+      });
+    }
+
+    window.setTimeout(() => prepareUpcomingSong(getPreparedCandidate()), 0);
+    window.setTimeout(() => saveAudioPlayback(), 250);
+
+    websocketRef.current?.send(JSON.stringify({
+      type: 'playback:state',
+      payload: { songId: song.id, isPlaying: true, progress: 0, volume: volumeRef.current }
+    }));
   };
 
   const togglePlay = () => {
@@ -498,15 +1216,23 @@ export default function App() {
     }
 
     setPlayerState(prev => ({ ...prev, isPlaying: !prev.isPlaying }));
+    window.setTimeout(() => saveAudioPlayback(), 0);
   };
 
   const playNext = () => {
     const { queue, currentIndex } = playerState;
-    if (queue.length === 0) return;
+    if (queue.length === 0) {
+      void startSmartQueue();
+      return;
+    }
+
+    if (currentIndex >= queue.length - 1 && autoplayNext) {
+      void playAutoplayRecommendations(playerState.currentSong?.id);
+      return;
+    }
     
     const nextIndex = (currentIndex + 1) % queue.length;
-    playSong(queue[nextIndex]);
-    setPlayerState(prev => ({ ...prev, currentIndex: nextIndex }));
+    playSong(queue[nextIndex], queue);
   };
 
   const playPrev = () => {
@@ -514,8 +1240,7 @@ export default function App() {
     if (queue.length === 0) return;
     
     const prevIndex = (currentIndex - 1 + queue.length) % queue.length;
-    playSong(queue[prevIndex]);
-    setPlayerState(prev => ({ ...prev, currentIndex: prevIndex }));
+    playSong(queue[prevIndex], queue);
   };
 
   const seekToProgress = (progress: number) => {
@@ -563,7 +1288,52 @@ export default function App() {
     }
   };
 
+  const openActionsForSong = (song: Song) => {
+    setActionSong(song);
+    setShowActionsSheet(true);
+  };
+
+  const addSongToQueue = (song: Song) => {
+    setPlayerState(prev => {
+      const currentIndex = Math.max(prev.currentIndex, 0);
+      const queue = prev.queue.length > 0 ? [...prev.queue] : (prev.currentSong ? [prev.currentSong] : []);
+      const insertAt = Math.min(currentIndex + 1, queue.length);
+      queue.splice(insertAt, 0, song);
+      return {
+        ...prev,
+        queue,
+        currentIndex: prev.currentSong ? queue.findIndex(item => item.id === prev.currentSong?.id) : 0,
+      };
+    });
+    prepareUpcomingSong(song);
+    setShowActionsSheet(false);
+  };
+
+  const goToSongAlbum = (song: Song) => {
+    const album = albums.find(item => item.title === song.album);
+    if (album) {
+      applyFilter('album', album.id, album.title);
+      setShowActionsSheet(false);
+    }
+  };
+
+  const goToSongArtist = (song: Song) => {
+    const artist = artists.find(item => item.name === song.artist);
+    if (artist) {
+      applyFilter('artist', artist.id, artist.name);
+      setShowActionsSheet(false);
+    }
+  };
+
+  const startSongRadio = async (song: Song) => {
+    const recommendations = await fetchSmartQueue(song.id, 25);
+    const radioQueue = [song, ...recommendations.filter(item => item.id !== song.id)];
+    playSong(song, radioQueue);
+    setShowActionsSheet(false);
+  };
+
   const currentSong = playerState.currentSong;
+  const menuSong = actionSong || currentSong;
   const upcomingQueue = playerState.queue.slice(Math.max(playerState.currentIndex + 1, 0));
   const sourceLabel = activeView === 'home' ? 'Home' : selectedFilter?.name || 'Search';
   const cleanLyricLines = (lyrics || '')
@@ -573,8 +1343,27 @@ export default function App() {
 
   const filteredSongs = songs.filter(s => 
     s.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.artist.toLowerCase().includes(searchQuery.toLowerCase())
+    s.artist.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (s.album || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (s.genre || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const filteredArtists = normalizedSearch
+    ? artists.filter(artist => artist.name.toLowerCase().includes(normalizedSearch))
+    : artists;
+  const filteredAlbums = normalizedSearch
+    ? albums.filter(album => album.title.toLowerCase().includes(normalizedSearch) || album.artist.toLowerCase().includes(normalizedSearch))
+    : albums;
+  const filteredGenres = normalizedSearch
+    ? genres.filter(genre => genre.name.toLowerCase().includes(normalizedSearch))
+    : genres;
+  const totalDuration = filteredSongsDuration(filteredSongs);
+  const selectedArtist = selectedFilter?.type === 'artist' ? artists.find(artist => artist.id === selectedFilter.id) : null;
+  const selectedAlbum = selectedFilter?.type === 'album' ? albums.find(album => album.id === selectedFilter.id) : null;
+  const selectedCover = selectedAlbum?.coverArtPath || filteredSongs.find(song => song.coverArtPath)?.coverArtPath || null;
+  const detailSubtitle = selectedFilter
+    ? `${filteredSongs.length} tracks - ${formatTime(totalDuration)} total`
+    : `${songs.length} tracks in your library`;
 
   return (
     <div id="app-root" className="flex h-screen overflow-hidden text-sm md:text-base">
@@ -596,11 +1385,20 @@ export default function App() {
             <div onClick={() => setActiveView('library')}>
               <NavItem icon={<LibraryIcon size={20} />} label="Your Library" active={activeView === 'library'} />
             </div>
+            <div onClick={openVideos}>
+              <NavItem icon={<Clapperboard size={20} />} label="Videos" active={activeView === 'videos'} />
+            </div>
             <div onClick={() => setShowPlaylistModal(true)}>
               <NavItem icon={<PlusCircle size={20} />} label="Create Playlist" />
             </div>
             <div onClick={() => fetchSongs({ favorite: true }).then(() => { setSelectedFilter({ type: 'genre', id: 0, name: 'Liked Songs' }); setLibraryTab('songs'); })}>
               <NavItem icon={<Heart size={20} />} label="Liked Songs" />
+            </div>
+            <div onClick={() => { fetchDashboardData(); setShowStatsSheet(true); }}>
+              <NavItem icon={<BarChart3 size={20} />} label="Analytics" />
+            </div>
+            <div onClick={() => { fetchDashboardData(); setShowToolsSheet(true); }}>
+              <NavItem icon={<Wrench size={20} />} label="Library Tools" />
             </div>
           </div>
         </div>
@@ -630,12 +1428,17 @@ export default function App() {
       </nav>
 
       {/* Main Content */}
-      <main id="main-content" className="flex-1 flex flex-col bg-gradient-to-b from-brand-light to-brand-black overflow-hidden relative">
+      <main
+        id="main-content"
+        className="flex-1 flex flex-col overflow-hidden relative transition-colors duration-700"
+        style={{ background: `linear-gradient(180deg, ${theme.secondary}55 0%, ${theme.background} 34%, #121212 100%)` }}
+      >
         <header id="top-bar" className="p-6 flex items-center justify-between z-10">
           <div className="flex items-center space-x-4 flex-1 max-w-md">
             <div className="relative w-full">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} />
               <input 
+                id="global-search"
                 type="text" 
                 placeholder="Search songs, artists, albums..."
                 value={searchQuery}
@@ -651,6 +1454,20 @@ export default function App() {
               aria-label="Open settings"
              >
               <SlidersHorizontal size={18} />
+             </button>
+             <button
+              onClick={() => { fetchDashboardData(); setShowStatsSheet(true); }}
+              className="hidden h-9 w-9 items-center justify-center rounded-full bg-white/10 text-zinc-200 transition-colors hover:bg-white/15 md:flex"
+              aria-label="Open analytics"
+             >
+              <BarChart3 size={18} />
+             </button>
+             <button
+              onClick={openVideos}
+              className="hidden h-9 w-9 items-center justify-center rounded-full bg-white/10 text-zinc-200 transition-colors hover:bg-white/15 md:flex"
+              aria-label="Open videos"
+             >
+              <Clapperboard size={18} />
              </button>
              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold ring-1 ring-white/10">
                 SJ
@@ -672,15 +1489,50 @@ export default function App() {
                  <div onClick={scanLibrary}>
                   <QuickTile title="Scan Library" icon={<Settings className="text-green-500" size={24} />} />
                  </div>
+                 <div onClick={openVideos}>
+                  <QuickTile title="Videos" icon={<Clapperboard className="text-orange-400" size={24} />} />
+                 </div>
               </div>
 
               <div className="mb-12 grid grid-cols-2 gap-3 lg:grid-cols-4">
                 <FeatureTile icon={<Maximize2 size={20} />} label="Open Player" value={currentSong ? currentSong.title : 'Start first song'} onClick={() => currentSong ? openCurrentPlayer() : playVisibleSongs(false)} />
                 <FeatureTile icon={<ListMusic size={20} />} label="Queue" value={`${upcomingQueue.length} upcoming`} onClick={() => currentSong ? setShowQueueSheet(true) : playVisibleSongs(false)} />
                 <FeatureTile icon={<SlidersHorizontal size={20} />} label="Settings" value={`${playbackSpeed.toFixed(playbackSpeed === 1 ? 0 : 2)}x playback`} onClick={() => setShowSettingsSheet(true)} />
-                <FeatureTile icon={<Sparkles size={20} />} label="Smart Shuffle" value={playerState.shuffle ? 'Enabled' : 'Tap to start'} onClick={() => playVisibleSongs(true)} />
+                <FeatureTile icon={<Sparkles size={20} />} label="Smart Queue" value={smartQueue[0]?.reason || 'Recommendations'} onClick={startSmartQueue} />
+                <FeatureTile icon={<BarChart3 size={20} />} label="Analytics" value={`${stats?.totals?.playCount || 0} plays`} onClick={() => { fetchDashboardData(); setShowStatsSheet(true); }} />
+                <FeatureTile icon={<Wrench size={20} />} label="Library Tools" value={`${duplicates.length} duplicate groups`} onClick={() => { fetchDashboardData(); setShowToolsSheet(true); }} />
+                <FeatureTile icon={<Minimize2 size={20} />} label="Mini Player" value={showMiniPlayer ? 'Visible' : 'Floating mode'} onClick={() => setShowMiniPlayer(prev => !prev)} />
+                <FeatureTile icon={<Clapperboard size={20} />} label="Videos" value={`${videoSeries.length} series`} onClick={openVideos} />
               </div>
             </>
+          ) : activeView === 'videos' ? (
+            <VideoLibraryView
+              series={videoSeries}
+              loading={videoLoading}
+              error={videoError}
+              selectedSeries={selectedVideoSeries}
+              selectedSeason={selectedVideoSeason}
+              selectedEpisode={selectedVideoEpisode}
+              onRefresh={scanVideoSeries}
+              onSelectSeries={(series) => {
+                setSelectedVideoSeries(series);
+                setSelectedVideoSeason(series.seasons[0] || null);
+                setSelectedVideoEpisode(null);
+              }}
+              onSelectSeason={(season) => {
+                setSelectedVideoSeason(season);
+                setSelectedVideoEpisode(null);
+              }}
+              onSelectEpisode={setSelectedVideoEpisode}
+              onUpdateSeries={updateVideoSeries}
+              onBack={() => {
+                if (selectedVideoEpisode) setSelectedVideoEpisode(null);
+                else if (selectedVideoSeries) {
+                  setSelectedVideoSeries(null);
+                  setSelectedVideoSeason(null);
+                } else setActiveView('home');
+              }}
+            />
           ) : (
             <div className="mb-8">
               <div className="flex items-center justify-between gap-4 mb-6">
@@ -711,6 +1563,46 @@ export default function App() {
                   <TabItem active={libraryTab === 'genres'} onClick={() => setLibraryTab('genres')} label="Genres" />
                 </div>
               )}
+              {selectedFilter && (
+                <div className="mb-8 grid gap-5 rounded-xl border border-white/10 bg-white/[.04] p-5 md:grid-cols-[160px_1fr]">
+                  <div className={`aspect-square overflow-hidden bg-zinc-800 ${selectedFilter.type === 'artist' ? 'rounded-full' : 'rounded-lg'}`}>
+                    {selectedCover ? (
+                      <img src={selectedCover} alt={selectedFilter.name} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-zinc-600">
+                        {selectedFilter.type === 'artist' ? <UserRound size={56} /> : <Disc3 size={56} />}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex min-w-0 flex-col justify-end gap-4">
+                    <div>
+                      <div className="mb-2 text-xs font-extrabold uppercase tracking-widest text-zinc-400">
+                        {selectedFilter.type === 'artist' ? 'Artist' : selectedFilter.type === 'album' ? 'Album' : selectedFilter.type === 'playlist' ? 'Playlist' : 'Collection'}
+                      </div>
+                      <h2 className="truncate text-4xl font-black tracking-normal text-white">{selectedFilter.name}</h2>
+                      <p className="mt-2 text-sm font-semibold text-zinc-400">
+                        {selectedArtist ? 'Local artist page' : selectedAlbum?.artist || detailSubtitle}
+                        {selectedAlbum && ` - ${detailSubtitle}`}
+                      </p>
+                    </div>
+                    {selectedFilter.type === 'playlist' && (
+                      <div className="flex flex-col gap-3 sm:flex-row">
+                        <input
+                          value={playlistDraftName}
+                          onChange={(e) => setPlaylistDraftName(e.target.value)}
+                          onBlur={renamePlaylist}
+                          onKeyDown={(e) => e.key === 'Enter' && renamePlaylist()}
+                          className="min-w-0 flex-1 rounded-full bg-black/30 px-4 py-2 text-sm font-bold outline-none ring-1 ring-white/10 focus:ring-brand-primary"
+                        />
+                        <button onClick={renamePlaylist} className="inline-flex items-center justify-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-extrabold text-black active:scale-95">
+                          <Pencil size={16} />
+                          Rename
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
                 <FeatureTile icon={<Maximize2 size={20} />} label="Now Playing" value={currentSong ? 'Expand player' : 'Start first song'} onClick={() => currentSong ? openCurrentPlayer() : playVisibleSongs(false)} />
                 <FeatureTile icon={<ListMusic size={20} />} label="Queue" value={`${upcomingQueue.length} next`} onClick={() => currentSong ? setShowQueueSheet(true) : playVisibleSongs(false)} />
@@ -720,7 +1612,7 @@ export default function App() {
             </div>
           )}
 
-          {loading ? (
+          {activeView !== 'videos' && (loading ? (
             <div className="flex flex-col items-center justify-center py-20 space-y-4">
                <div className="w-12 h-12 border-4 border-brand-primary border-t-transparent rounded-full animate-spin"></div>
                <p className="text-zinc-400">Loading your music library...</p>
@@ -728,29 +1620,56 @@ export default function App() {
           ) : (
             <>
               {libraryTab === 'songs' && (
-                <div id="song-grid" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                  {filteredSongs.map(song => (
-                    <SongCard 
-                      key={song.id} 
-                      song={song} 
-                      onClick={() => playSong(song, filteredSongs)}
-                      isActive={playerState.currentSong?.id === song.id}
-                      isPlaying={playerState.currentSong?.id === song.id && playerState.isPlaying}
-                      onAddToPlaylist={(playlistId) => addSongToPlaylist(playlistId, song.id)}
-                      playlists={playlists}
-                    />
-                  ))}
-                  {filteredSongs.length === 0 && (
-                    <div className="col-span-full py-20 text-center text-zinc-500">No songs found in this selection.</div>
-                  )}
-                </div>
+                selectedFilter?.type === 'playlist' ? (
+                  <div className="space-y-2">
+                    {filteredSongs.map((song, index) => (
+                      <PlaylistSongRow
+                        key={song.id}
+                        song={song}
+                        index={index}
+                        isActive={playerState.currentSong?.id === song.id}
+                        isPlaying={playerState.currentSong?.id === song.id && playerState.isPlaying}
+                        onPlay={() => playSong(song, filteredSongs)}
+                        onMoreOptions={() => openActionsForSong(song)}
+                        onRemove={() => removeSongFromPlaylist(song.id)}
+                        onDragStart={() => setDraggedPlaylistIndex(index)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={() => {
+                          if (draggedPlaylistIndex !== null) movePlaylistSong(draggedPlaylistIndex, index);
+                          setDraggedPlaylistIndex(null);
+                        }}
+                      />
+                    ))}
+                    {filteredSongs.length === 0 && (
+                      <div className="py-20 text-center text-zinc-500">No songs found in this playlist.</div>
+                    )}
+                  </div>
+                ) : (
+                  <div id="song-grid" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                    {filteredSongs.map(song => (
+                      <SongCard 
+                        key={song.id} 
+                        song={song} 
+                        onClick={() => playSong(song, filteredSongs)}
+                        isActive={playerState.currentSong?.id === song.id}
+                        isPlaying={playerState.currentSong?.id === song.id && playerState.isPlaying}
+                        onMoreOptions={() => openActionsForSong(song)}
+                        onAddToPlaylist={(playlistId) => addSongToPlaylist(playlistId, song.id)}
+                        playlists={playlists}
+                      />
+                    ))}
+                    {filteredSongs.length === 0 && (
+                      <div className="col-span-full py-20 text-center text-zinc-500">No songs found in this selection.</div>
+                    )}
+                  </div>
+                )
               )}
 
               {activeView === 'library' && !selectedFilter && (
                 <>
                   {libraryTab === 'artists' && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                      {artists.map(artist => (
+                      {filteredArtists.map(artist => (
                         <BrowseCard 
                           key={artist.id} 
                           title={artist.name} 
@@ -764,7 +1683,7 @@ export default function App() {
 
                   {libraryTab === 'albums' && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                      {albums.map(album => (
+                      {filteredAlbums.map(album => (
                         <BrowseCard 
                           key={album.id} 
                           title={album.title} 
@@ -778,7 +1697,7 @@ export default function App() {
 
                   {libraryTab === 'genres' && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-                      {genres.map(genre => (
+                      {filteredGenres.map(genre => (
                         <BrowseCard 
                           key={genre.id} 
                           title={genre.name} 
@@ -791,7 +1710,7 @@ export default function App() {
                 </>
               )}
             </>
-          )}
+          ))}
           
           <div className="h-32" /> {/* Spacer for player */}
         </div>
@@ -900,6 +1819,9 @@ export default function App() {
               <button onClick={(e) => { e.stopPropagation(); setShowSettingsSheet(true); }} className="text-zinc-400 hover:text-white cursor-pointer" aria-label="Open playback settings">
                 <SlidersHorizontal size={20} />
               </button>
+              <button onClick={(e) => { e.stopPropagation(); openActionsForSong(playerState.currentSong!); }} className="text-zinc-400 hover:text-white cursor-pointer" aria-label="More options">
+                <MoreVertical size={20} />
+              </button>
               <div className="flex items-center space-x-2 group">
                 <button onClick={toggleMute}>
                   {isMuted || volume === 0 ? <VolumeX size={20} className="text-zinc-400 group-hover:text-white" /> : <Volume2 size={20} className="text-zinc-400 group-hover:text-white" />}
@@ -1004,7 +1926,7 @@ export default function App() {
                   </div>
                   <div className="truncate text-sm font-extrabold leading-5">{playerState.currentSong.album || 'Recent Searches'}</div>
                 </div>
-                <button onClick={() => setShowActionsSheet(true)} className="-mr-2 p-2 text-white/90 active:scale-95" aria-label="More options">
+                <button onClick={() => openActionsForSong(playerState.currentSong!)} className="-mr-2 p-2 text-white/90 active:scale-95" aria-label="More options">
                   <MoreVertical size={27} />
                 </button>
               </div>
@@ -1159,40 +2081,95 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <BottomSheet open={showActionsSheet && !!currentSong} onClose={() => setShowActionsSheet(false)} title="Track options">
-        {currentSong && (
+      <BottomSheet open={showActionsSheet && !!menuSong} onClose={() => setShowActionsSheet(false)} title="Track options">
+        {menuSong && (
           <>
             <div className="mb-5 flex items-center gap-4">
               <div className="h-16 w-16 overflow-hidden rounded-md bg-zinc-800">
-                {currentSong.coverArtPath ? (
-                  <img src={currentSong.coverArtPath} alt={currentSong.title} className="h-full w-full object-cover" />
+                {menuSong.coverArtPath ? (
+                  <img src={menuSong.coverArtPath} alt={menuSong.title} className="h-full w-full object-cover" />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center text-zinc-600"><Music2 size={26} /></div>
                 )}
               </div>
               <div className="min-w-0">
-                <div className="truncate text-lg font-extrabold">{currentSong.title}</div>
-                <div className="truncate text-sm font-semibold text-zinc-400">{currentSong.artist}</div>
+                <div className="truncate text-lg font-extrabold">{menuSong.title}</div>
+                <div className="truncate text-sm font-semibold text-zinc-400">{menuSong.artist} - {menuSong.album || 'Unknown album'}</div>
               </div>
             </div>
-            <ActionRow icon={<Heart size={22} />} label={currentSong.isFavorite ? 'Remove from Liked Songs' : 'Save to Liked Songs'} onClick={() => toggleFavorite(currentSong.id, !!currentSong.isFavorite)} />
-            <ActionRow icon={<PlusCircle size={22} />} label="Create playlist" onClick={() => { setShowActionsSheet(false); setShowPlaylistModal(true); }} />
+            <ActionRow icon={<Share2 size={22} />} label="Share" onClick={() => shareSong(menuSong)} />
+            <ActionRow icon={<Heart size={22} />} label={menuSong.isFavorite ? 'Remove from Liked Songs' : 'Add to Liked Songs'} onClick={() => toggleFavorite(menuSong.id, !!menuSong.isFavorite)} />
+            <ActionRow icon={<PlusCircle size={22} />} label="Add to playlist" onClick={() => { setShowActionsSheet(false); setShowPlaylistModal(true); }} />
             {playlists.slice(0, 4).map(playlist => (
               <ActionRow
                 key={playlist.id}
                 icon={<Plus size={22} />}
                 label={`Add to ${playlist.name}`}
                 onClick={() => {
-                  addSongToPlaylist(playlist.id, currentSong.id);
+                  addSongToPlaylist(playlist.id, menuSong.id);
                   setShowActionsSheet(false);
                 }}
               />
             ))}
-            <ActionRow icon={<Download size={22} />} label="Download track" onClick={() => window.open(`/api/download/${currentSong.id}`, '_blank')} />
-            <ActionRow icon={<Share2 size={22} />} label="Share song" onClick={() => shareSong(currentSong)} />
-            <ActionRow icon={<ListMusic size={22} />} label="Open queue" onClick={() => { setShowActionsSheet(false); setShowQueueSheet(true); }} />
-            <ActionRow icon={<Info size={22} />} label={`${currentSong.album || 'Unknown album'} - ${currentSong.format.toUpperCase()} - ${formatTime(currentSong.duration)}`} />
+            <ActionRow icon={<ListMusic size={22} />} label="Add to Queue" onClick={() => addSongToQueue(menuSong)} />
+            <ActionRow icon={<Disc3 size={22} />} label="Go to album" onClick={() => goToSongAlbum(menuSong)} />
+            <ActionRow icon={<UserRound size={22} />} label="Go to artists" onClick={() => goToSongArtist(menuSong)} />
+            <ActionRow icon={<Radio size={22} />} label="Go to song radio" onClick={() => startSongRadio(menuSong)} />
+            <ActionRow icon={<FileText size={22} />} label="View song credits" onClick={() => { setShowActionsSheet(false); setShowSongCreditsSheet(true); }} />
+            <ActionRow icon={<AudioLines size={22} />} label="Show Spotify Code" onClick={() => { setShowActionsSheet(false); setShowSpotifyCodeSheet(true); }} />
+            <ActionRow icon={<Download size={22} />} label="Download track" onClick={() => window.open(`/api/download/${menuSong.id}`, '_blank')} />
+            <ActionRow icon={<Pencil size={22} />} label="Edit metadata" onClick={() => { setShowActionsSheet(false); openMetadataEditor(menuSong); }} />
+            <ActionRow icon={<BadgeInfo size={22} />} label={`${menuSong.format.toUpperCase()} - ${formatTime(menuSong.duration)} - ${losslessMode ? 'Lossless preferred' : 'Auto quality'}`} />
           </>
+        )}
+      </BottomSheet>
+
+      <BottomSheet open={showSongCreditsSheet && !!menuSong} onClose={() => setShowSongCreditsSheet(false)} title="Song credits">
+        {menuSong && (
+          <div className="space-y-3">
+            <CreditRow label="Song" value={menuSong.title} />
+            <CreditRow label="Artist" value={menuSong.artist} />
+            <CreditRow label="Album" value={menuSong.album || 'Unknown album'} />
+            <CreditRow label="Album artist" value={menuSong.albumArtist || menuSong.artist} />
+            <CreditRow label="Composer" value={menuSong.composer || 'Not listed'} />
+            <CreditRow label="Year" value={menuSong.year || 'Not listed'} />
+            <CreditRow label="Format" value={`${menuSong.format.toUpperCase()} - ${formatTime(menuSong.duration)}`} />
+          </div>
+        )}
+      </BottomSheet>
+
+      <BottomSheet open={showSpotifyCodeSheet && !!menuSong} onClose={() => setShowSpotifyCodeSheet(false)} title="Spotify Code">
+        {menuSong && (
+          <div className="space-y-5">
+            <div className="flex items-center gap-4 rounded-2xl bg-white/[.04] p-4">
+              <div className="h-16 w-16 overflow-hidden rounded-md bg-zinc-800">
+                {menuSong.coverArtPath ? (
+                  <img src={menuSong.coverArtPath} alt={menuSong.title} className="h-full w-full object-cover" />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-zinc-600"><Music2 size={26} /></div>
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-base font-extrabold">{menuSong.title}</div>
+                <div className="truncate text-sm font-semibold text-zinc-400">{menuSong.artist}</div>
+              </div>
+            </div>
+            <div className="rounded-2xl bg-white p-5 text-black">
+              <div className="mb-4 flex items-center justify-between">
+                <QrCode size={34} />
+                <div className="text-right text-xs font-black uppercase tracking-widest">Streamify Code</div>
+              </div>
+              <div className="flex h-20 items-center gap-1 overflow-hidden rounded-lg bg-black px-3">
+                {Array.from({ length: 38 }).map((_, index) => (
+                  <span
+                    key={index}
+                    className="w-1.5 rounded-full bg-white"
+                    style={{ height: `${18 + ((menuSong.id * (index + 7)) % 54)}px` }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
         )}
       </BottomSheet>
 
@@ -1205,13 +2182,23 @@ export default function App() {
             </div>
             <div className="mb-3 flex items-center justify-between">
               <div className="text-xs font-extrabold uppercase tracking-widest text-zinc-500">Next Up</div>
-              <button onClick={shuffleQueue} className="text-xs font-bold text-brand-primary">{playerState.shuffle ? 'Shuffle On' : 'Shuffle'}</button>
+              <div className="flex items-center gap-4">
+                <button onClick={startSmartQueue} className="text-xs font-bold text-brand-primary">Smart</button>
+                <button onClick={shuffleQueue} className="text-xs font-bold text-brand-primary">{playerState.shuffle ? 'Shuffle On' : 'Shuffle'}</button>
+              </div>
             </div>
             <div className="space-y-2">
               {upcomingQueue.length > 0 ? upcomingQueue.map((song, index) => (
                 <QueueItem
                   key={`${song.id}-${index}`}
                   song={song}
+                  draggable
+                  onDragStart={() => setDraggedQueueIndex(playerState.currentIndex + 1 + index)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => {
+                    if (draggedQueueIndex !== null) moveQueueSong(draggedQueueIndex, playerState.currentIndex + 1 + index);
+                    setDraggedQueueIndex(null);
+                  }}
                   onClick={() => {
                     const queueIndex = playerState.queue.findIndex(item => item.id === song.id);
                     playSong(song);
@@ -1220,7 +2207,17 @@ export default function App() {
                   }}
                 />
               )) : (
-                <div className="rounded-2xl bg-white/5 p-5 text-sm font-medium text-zinc-400">Nothing else queued. Autoplay can keep the music going from Settings.</div>
+                <div className="space-y-3">
+                  <div className="rounded-2xl bg-white/5 p-5 text-sm font-medium text-zinc-400">Nothing else queued. Smart Queue can keep the music going.</div>
+                  {smartQueue.slice(0, 5).map(song => (
+                    <QueueItem
+                      key={`smart-${song.id}`}
+                      song={song}
+                      reason={song.reason}
+                      onClick={() => playSong(song, [song, ...smartQueue.filter(item => item.id !== song.id)])}
+                    />
+                  ))}
+                </div>
               )}
             </div>
           </>
@@ -1237,12 +2234,160 @@ export default function App() {
           }} />
           <RangeRow icon={<SlidersHorizontal size={22} />} label="Audio boost" value={`${audioBoost > 0 ? '+' : ''}${audioBoost} dB`} min={0} max={12} step={1} current={audioBoost} onChange={setAudioBoost} />
           <RangeRow icon={<RotateCcw size={22} />} label="Crossfade" value={`${crossfade}s`} min={0} max={12} step={1} current={crossfade} onChange={setCrossfade} />
+          <div className="rounded-2xl bg-white/[.04] p-4">
+            <div className="mb-3 flex items-center gap-3">
+              <SlidersHorizontal size={22} className="text-zinc-300" />
+              <div className="text-[15px] font-extrabold">Equalizer</div>
+              <div className="ml-auto text-xs font-bold text-brand-primary">{eqPreset}</div>
+            </div>
+            <div className="mb-4 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+              {Object.keys(eqPresets).map(name => (
+                <button
+                  key={name}
+                  onClick={() => applyEqPreset(name)}
+                  className={`whitespace-nowrap rounded-full px-3 py-2 text-xs font-extrabold ${eqPreset === name ? 'bg-brand-primary text-black' : 'bg-white/10 text-white'}`}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-5 gap-2">
+              {Object.entries(eqBands).map(([band, value]) => (
+                <label key={band} className="flex flex-col items-center gap-2 text-[10px] font-bold text-zinc-400">
+                  <input
+                    type="range"
+                    min="-12"
+                    max="12"
+                    step="1"
+                    value={value}
+                    onChange={(e) => {
+                      setEqPreset('Custom');
+                      setEqBands(prev => ({ ...prev, [band]: Number(e.target.value) }));
+                    }}
+                    className="h-24 w-6 [writing-mode:vertical-rl]"
+                  />
+                  <span>{band}</span>
+                </label>
+              ))}
+            </div>
+          </div>
           <ToggleRow icon={<Radio size={22} />} label="High quality local streaming" description="Prioritizes full source quality where available." enabled={losslessMode} onToggle={() => setLosslessMode(prev => !prev)} />
           <ToggleRow icon={<Volume2 size={22} />} label="Normalize audio" description="Keeps loud and quiet tracks closer together." enabled={normalizeAudio} onToggle={() => setNormalizeAudio(prev => !prev)} />
           <ToggleRow icon={<ListMusic size={22} />} label="Autoplay similar songs" description="Keeps playing when the queue ends." enabled={autoplayNext} onToggle={() => setAutoplayNext(prev => !prev)} />
           <ToggleRow icon={<Radio size={22} />} label="Album art visualizer" description="Shows animated frequency bars over cover art." enabled={showVisualizer} onToggle={() => setShowVisualizer(prev => !prev)} />
         </div>
       </BottomSheet>
+
+      <BottomSheet open={showStatsSheet} onClose={() => setShowStatsSheet(false)} title="Analytics">
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 gap-3">
+            <StatTile label="Songs" value={stats?.totals?.songCount || songs.length} />
+            <StatTile label="Plays" value={stats?.totals?.playCount || 0} />
+            <StatTile label="Listening Time" value={formatTime(stats?.playedSeconds?.total || 0)} />
+            <StatTile label="Favorites" value={stats?.totals?.favoriteCount || 0} />
+          </div>
+          <MiniBars title="Listening by hour" items={(stats?.hourly || []).map((item: any) => ({ label: `${item.hour}`, value: item.plays }))} />
+          <MiniBars title="Genres" items={(stats?.genreDistribution || []).map((item: any) => ({ label: item.name, value: item.tracks }))} />
+          <div>
+            <div className="mb-3 text-xs font-extrabold uppercase tracking-widest text-zinc-500">Top Songs</div>
+            <div className="space-y-2">
+              {(stats?.topSongs || []).slice(0, 6).map((song: Song) => (
+                <QueueItem key={`top-${song.id}`} song={song} reason={`${song.playCount || 0} plays`} onClick={() => playSong(song, stats.topSongs)} />
+              ))}
+            </div>
+          </div>
+        </div>
+      </BottomSheet>
+
+      <BottomSheet open={showToolsSheet} onClose={() => setShowToolsSheet(false)} title="Library tools">
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 gap-3">
+            <ToolCard icon={<ShieldCheck size={22} />} label="Health" value={`${health?.missingFiles?.length || 0} missing files`} />
+            <ToolCard icon={<Trash2 size={22} />} label="Duplicates" value={`${duplicates.length} groups`} />
+            <ToolCard icon={<Upload size={22} />} label="Import" value="M3U / JSON ready" />
+            <ToolCard icon={<FileText size={22} />} label="Export" value="Playlist export API" />
+            <ToolCard icon={<Users size={22} />} label="Profiles" value={`${profiles.length || 1} local users`} />
+            <ToolCard icon={<Keyboard size={22} />} label="Shortcuts" value="Space, /, F, Ctrl+K" />
+          </div>
+          <div>
+            <div className="mb-3 text-xs font-extrabold uppercase tracking-widest text-zinc-500">Mood Mixes</div>
+            <div className="grid grid-cols-2 gap-2">
+              {mixes.map((mix: any) => (
+                <button
+                  key={mix.id}
+                  onClick={() => {
+                    setSongs(mix.songs || []);
+                    setSelectedFilter({ type: 'mix', id: 0, name: mix.name });
+                    setLibraryTab('songs');
+                    setShowToolsSheet(false);
+                  }}
+                  className="rounded-2xl bg-white/[.05] p-4 text-left active:scale-[.99]"
+                >
+                  <div className="text-sm font-extrabold">{mix.name}</div>
+                  <div className="mt-1 text-xs font-semibold text-zinc-400">{mix.songs?.length || 0} tracks</div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="mb-3 text-xs font-extrabold uppercase tracking-widest text-zinc-500">Duplicate groups</div>
+            <div className="space-y-2">
+              {duplicates.slice(0, 5).map(group => (
+                <div key={group.fingerprint} className="rounded-2xl bg-white/[.04] p-4">
+                  <div className="text-sm font-extrabold">{group.reason}</div>
+                  <div className="mt-1 text-xs text-zinc-400">{group.items.map((item: Song) => item.title).join(' / ')}</div>
+                </div>
+              ))}
+              {duplicates.length === 0 && <div className="rounded-2xl bg-white/[.04] p-4 text-sm text-zinc-400">No obvious duplicate groups found.</div>}
+            </div>
+          </div>
+        </div>
+      </BottomSheet>
+
+      <BottomSheet open={showMetadataSheet} onClose={() => setShowMetadataSheet(false)} title="Metadata editor">
+        <div className="space-y-3">
+          {['title', 'artist', 'album', 'albumArtist', 'genre', 'year', 'trackNumber', 'discNumber', 'composer'].map(field => (
+            <label key={field} className="block">
+              <span className="mb-1 block text-xs font-extrabold uppercase tracking-widest text-zinc-500">{field}</span>
+              <input
+                value={metadataDraft[field] ?? ''}
+                onChange={(e) => setMetadataDraft(prev => ({ ...prev, [field]: e.target.value }))}
+                className="w-full rounded-xl bg-white/10 px-4 py-3 text-sm font-bold outline-none ring-1 ring-white/10 focus:ring-brand-primary"
+              />
+            </label>
+          ))}
+          <div className="flex gap-3 pt-3">
+            <button onClick={() => fetch('/api/metadata/undo', { method: 'POST' }).then(fetchAllData)} className="flex-1 rounded-full bg-white/10 py-3 text-sm font-extrabold">Undo last</button>
+            <button onClick={saveMetadata} className="flex-1 rounded-full bg-brand-primary py-3 text-sm font-extrabold text-black">Save</button>
+          </div>
+        </div>
+      </BottomSheet>
+
+      <AnimatePresence>
+        {showMiniPlayer && currentSong && (
+          <motion.div
+            initial={{ opacity: 0, y: 24, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 24, scale: 0.96 }}
+            className="fixed bottom-24 right-4 z-[75] w-[min(360px,calc(100vw-2rem))] rounded-2xl border border-white/10 bg-black/75 p-3 shadow-2xl backdrop-blur-xl"
+          >
+            <div className="flex items-center gap-3">
+              <div className="h-14 w-14 overflow-hidden rounded-lg bg-zinc-800">
+                {currentSong.coverArtPath ? <img src={currentSong.coverArtPath} alt={currentSong.title} className="h-full w-full object-cover" /> : <Music2 className="m-4 text-zinc-600" />}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-extrabold">{currentSong.title}</div>
+                <div className="truncate text-xs font-semibold text-zinc-400">{currentSong.artist}</div>
+                <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-brand-primary" style={{ width: `${playerState.progress}%` }} /></div>
+              </div>
+              <button onClick={togglePlay} className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black">
+                {playerState.isPlaying ? <Pause size={20} fill="black" /> : <Play size={20} fill="black" />}
+              </button>
+              <button onClick={() => setShowMiniPlayer(false)} className="text-zinc-400"><X size={18} /></button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Playlist Creation Modal */}
       <AnimatePresence>
@@ -1388,9 +2533,46 @@ function RangeRow({ icon, label, value, min, max, step, current, onChange }: { i
   );
 }
 
-function QueueItem({ song, active = false, isPlaying = false, onClick }: { song: Song, active?: boolean, isPlaying?: boolean, onClick: () => void }) {
+function CreditRow({ label, value }: { label: string, value: React.ReactNode }) {
   return (
-    <button onClick={onClick} className={`flex w-full items-center gap-3 rounded-2xl p-2 text-left transition-colors ${active ? 'bg-brand-primary/10' : 'hover:bg-white/5'}`}>
+    <div className="rounded-2xl bg-white/[.04] p-4">
+      <div className="text-xs font-extrabold uppercase tracking-widest text-zinc-500">{label}</div>
+      <div className="mt-1 break-words text-base font-bold text-white">{value}</div>
+    </div>
+  );
+}
+
+function QueueItem({
+  song,
+  active = false,
+  isPlaying = false,
+  reason,
+  draggable = false,
+  onClick,
+  onDragStart,
+  onDragOver,
+  onDrop
+}: {
+  song: Song,
+  active?: boolean,
+  isPlaying?: boolean,
+  reason?: string,
+  draggable?: boolean,
+  onClick: () => void,
+  onDragStart?: () => void,
+  onDragOver?: (event: React.DragEvent<HTMLButtonElement>) => void,
+  onDrop?: () => void
+}) {
+  return (
+    <button
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 rounded-2xl p-2 text-left transition-colors ${active ? 'bg-brand-primary/10' : 'hover:bg-white/5'}`}
+    >
+      {draggable && <GripVertical size={18} className="text-zinc-600" />}
       <div className="h-12 w-12 overflow-hidden rounded-md bg-zinc-800">
         {song.coverArtPath ? (
           <img src={song.coverArtPath} alt={song.title} className="h-full w-full object-cover" />
@@ -1400,10 +2582,69 @@ function QueueItem({ song, active = false, isPlaying = false, onClick }: { song:
       </div>
       <div className="min-w-0 flex-1">
         <div className={`truncate text-sm font-extrabold ${active ? 'text-brand-primary' : 'text-white'}`}>{song.title}</div>
-        <div className="truncate text-xs font-semibold text-zinc-400">{song.artist}</div>
+        <div className="truncate text-xs font-semibold text-zinc-400">{reason || song.artist}</div>
       </div>
       <div className="text-xs font-bold text-zinc-500">{isPlaying ? 'Playing' : formatTime(song.duration)}</div>
     </button>
+  );
+}
+
+function PlaylistSongRow({
+  song,
+  index,
+  isActive,
+  isPlaying,
+  onPlay,
+  onMoreOptions,
+  onRemove,
+  onDragStart,
+  onDragOver,
+  onDrop
+}: {
+  song: Song,
+  index: number,
+  isActive: boolean,
+  isPlaying: boolean,
+  onPlay: () => void,
+  onMoreOptions: () => void,
+  onRemove: () => void,
+  onDragStart: () => void,
+  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void,
+  onDrop: () => void
+}) {
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      className={`grid min-h-16 grid-cols-[34px_1fr_auto_auto_auto] items-center gap-3 rounded-xl px-3 py-2 transition-colors ${isActive ? 'bg-brand-primary/10' : 'bg-white/[.03] hover:bg-white/[.06]'}`}
+    >
+      <GripVertical size={18} className="cursor-grab text-zinc-600" />
+      <button onClick={onPlay} className="flex min-w-0 items-center gap-3 text-left">
+        <div className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded-md bg-zinc-800">
+          {song.coverArtPath ? (
+            <img src={song.coverArtPath} alt={song.title} className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-zinc-600"><Music2 size={20} /></div>
+          )}
+          <div className="absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition-opacity hover:opacity-100">
+            {isPlaying ? <Pause size={18} fill="white" /> : <Play size={18} fill="white" />}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className={`truncate text-sm font-extrabold ${isActive ? 'text-brand-primary' : 'text-white'}`}>{song.title}</div>
+          <div className="truncate text-xs font-semibold text-zinc-400">{index + 1}. {song.artist} - {song.album || 'Unknown album'}</div>
+        </div>
+      </button>
+      <span className="hidden text-xs font-bold text-zinc-500 sm:block">{formatTime(song.duration)}</span>
+      <button onClick={onMoreOptions} className="flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-white/10 hover:text-white" aria-label="More options">
+        <MoreVertical size={18} />
+      </button>
+      <button onClick={onRemove} className="flex h-9 w-9 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-white/10 hover:text-white" aria-label="Remove from playlist">
+        <Trash2 size={17} />
+      </button>
+    </div>
   );
 }
 
@@ -1430,6 +2671,536 @@ interface BrowseCardProps {
   cover?: string | null;
   onClick: () => void;
   round?: boolean;
+}
+
+function VideoLibraryView({
+  series,
+  loading,
+  error,
+  selectedSeries,
+  selectedSeason,
+  selectedEpisode,
+  onRefresh,
+  onSelectSeries,
+  onSelectSeason,
+  onSelectEpisode,
+  onUpdateSeries,
+  onBack
+}: {
+  series: VideoSeries[];
+  loading: boolean;
+  error: string | null;
+  selectedSeries: VideoSeries | null;
+  selectedSeason: VideoSeason | null;
+  selectedEpisode: VideoEpisode | null;
+  onRefresh: () => void;
+  onSelectSeries: (series: VideoSeries) => void;
+  onSelectSeason: (season: VideoSeason) => void;
+  onSelectEpisode: (episode: VideoEpisode) => void;
+  onUpdateSeries: (series: VideoSeries, changes: { title: string; posterPath?: string | null }) => Promise<void>;
+  onBack: () => void;
+}) {
+  const seasons = selectedSeries?.seasons || [];
+  const activeSeason = selectedSeason || seasons[0] || null;
+  const episodes = activeSeason?.episodes || [];
+  const [editingSeries, setEditingSeries] = React.useState(false);
+  const [editTitle, setEditTitle] = React.useState('');
+  const [editPosterPath, setEditPosterPath] = React.useState('');
+  const [editError, setEditError] = React.useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!selectedSeries) {
+      setEditingSeries(false);
+      setEditError(null);
+      return;
+    }
+    setEditTitle(selectedSeries.title);
+    setEditPosterPath(selectedSeries.posterPath || '');
+    setEditError(null);
+  }, [selectedSeries?.id, selectedSeries?.title, selectedSeries?.posterPath]);
+
+  const saveSeriesEdit = async () => {
+    if (!selectedSeries || !editTitle.trim()) return;
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      await onUpdateSeries(selectedSeries, {
+        title: editTitle.trim(),
+        posterPath: editPosterPath.trim() || null,
+      });
+      setEditingSeries(false);
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : 'Could not update series');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="mb-2 flex items-center gap-3 text-brand-primary">
+            <Clapperboard size={24} />
+            <span className="text-xs font-extrabold uppercase tracking-widest">Local Videos</span>
+          </div>
+          <h1 className="truncate text-3xl font-black tracking-tight">
+            {selectedEpisode?.title || selectedSeries?.title || 'Videos'}
+          </h1>
+          <p className="mt-1 text-sm font-semibold text-zinc-400">
+            {selectedEpisode
+              ? `Season ${selectedEpisode.seasonNumber} - Episode ${selectedEpisode.episodeNumber}`
+              : selectedSeries
+                ? `${seasons.length} season${seasons.length === 1 ? '' : 's'}`
+                : `${series.length} series from your server`}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={onBack} className="rounded-full bg-white/10 px-4 py-2 text-sm font-extrabold text-white active:scale-95">
+            Back
+          </button>
+          {selectedSeries && !selectedEpisode && (
+            <button onClick={() => setEditingSeries(true)} className="flex items-center gap-2 rounded-full bg-white/10 px-4 py-2 text-sm font-extrabold text-white active:scale-95">
+              <Pencil size={16} />
+              Edit
+            </button>
+          )}
+          <button onClick={onRefresh} className="rounded-full bg-brand-primary px-4 py-2 text-sm font-extrabold text-black active:scale-95">
+            Scan Videos
+          </button>
+        </div>
+      </div>
+
+      {selectedEpisode ? (
+        <div className="space-y-5">
+          <VideoPlayer episode={selectedEpisode} seriesTitle={selectedSeries?.title || 'Video'} />
+          <div className="rounded-xl border border-white/10 bg-white/[.04] p-5">
+            <div className="text-sm font-extrabold text-brand-primary">
+              S{selectedEpisode.seasonNumber} E{selectedEpisode.episodeNumber}
+            </div>
+            <div className="mt-1 text-2xl font-black text-white">{selectedEpisode.title}</div>
+            {selectedEpisode.description && (
+              <p className="mt-3 max-w-3xl text-sm font-medium leading-6 text-zinc-400">{selectedEpisode.description}</p>
+            )}
+          </div>
+        </div>
+      ) : selectedSeries ? (
+        <div className="space-y-6">
+          <div className="grid gap-5 rounded-xl border border-white/10 bg-white/[.04] p-5 md:grid-cols-[180px_1fr]">
+            <VideoPoster src={selectedSeries.posterPath} title={selectedSeries.title} />
+            <div className="flex min-w-0 flex-col justify-end">
+              <div className="mb-2 text-xs font-extrabold uppercase tracking-widest text-zinc-500">Series</div>
+              <h2 className="truncate text-4xl font-black text-white">{selectedSeries.title}</h2>
+              <p className="mt-2 max-w-3xl text-sm font-semibold leading-6 text-zinc-400">
+                {selectedSeries.description || 'Local network streaming from your Streamify server.'}
+              </p>
+              {editingSeries && (
+                <div className="mt-5 grid gap-3 rounded-xl border border-white/10 bg-black/30 p-4">
+                  <input
+                    value={editTitle}
+                    onChange={event => setEditTitle(event.target.value)}
+                    className="rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-sm font-bold text-white outline-none focus:border-brand-primary"
+                    placeholder="Series title"
+                  />
+                  <input
+                    value={editPosterPath}
+                    onChange={event => setEditPosterPath(event.target.value)}
+                    className="rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-sm font-bold text-white outline-none focus:border-brand-primary"
+                    placeholder="/api/videos/local-art/Attack%20on%20Titan/poster.jpg or image URL"
+                  />
+                  {editError && <p className="text-xs font-bold text-red-300">{editError}</p>}
+                  <div className="flex gap-2">
+                    <button onClick={saveSeriesEdit} disabled={savingEdit} className="rounded-full bg-brand-primary px-4 py-2 text-sm font-extrabold text-black disabled:opacity-50">
+                      {savingEdit ? 'Saving...' : 'Save'}
+                    </button>
+                    <button onClick={() => setEditingSeries(false)} className="rounded-full bg-white/10 px-4 py-2 text-sm font-extrabold text-white">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+            {seasons.map(season => (
+              <button
+                key={season.seasonNumber}
+                onClick={() => onSelectSeason(season)}
+                className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-extrabold ${
+                  activeSeason?.seasonNumber === season.seasonNumber ? 'bg-brand-primary text-black' : 'bg-white/10 text-white'
+                }`}
+              >
+                {season.title || `Season ${season.seasonNumber}`}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-3">
+            {episodes.map(episode => (
+              <button
+                key={episode.id}
+                onClick={() => onSelectEpisode(episode)}
+                className="grid w-full grid-cols-[120px_1fr_auto] items-center gap-4 rounded-xl bg-white/[.05] p-3 text-left transition-colors hover:bg-white/[.08]"
+              >
+                <VideoThumb src={episode.thumbnailPath} title={episode.title} />
+                <div className="min-w-0">
+                  <div className="text-xs font-black uppercase tracking-widest text-brand-primary">Episode {episode.episodeNumber}</div>
+                  <div className="truncate text-base font-extrabold text-white">{episode.title}</div>
+                  <div className="text-xs font-semibold text-zinc-500">{episode.duration ? formatTime(episode.duration) : 'Ready to stream'}</div>
+                </div>
+                <Play size={22} className="text-brand-primary" fill="currentColor" />
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : loading ? (
+        <div className="flex flex-col items-center justify-center py-20 space-y-4">
+          <div className="h-12 w-12 animate-spin rounded-full border-4 border-brand-primary border-t-transparent" />
+          <p className="text-zinc-400">Scanning videos...</p>
+        </div>
+      ) : series.length === 0 ? (
+        <div className="rounded-xl border border-white/10 bg-white/[.04] p-8 text-center">
+          <Tv className="mx-auto mb-4 text-brand-primary" size={42} />
+          <div className="text-2xl font-black text-white">No videos found</div>
+          <p className="mt-2 text-sm font-semibold text-zinc-400">{error || 'Add files to the videos folder and scan again.'}</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+          {series.map(item => (
+            <button key={item.id} onClick={() => onSelectSeries(item)} className="rounded-xl bg-brand-gray/50 p-4 text-left transition-all hover:bg-brand-light">
+              <VideoPoster src={item.posterPath} title={item.title} />
+              <h3 className="mt-4 truncate font-bold text-white">{item.title}</h3>
+              <p className="truncate text-sm text-zinc-400">{item.seasons.length} season{item.seasons.length === 1 ? '' : 's'}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VideoPlayer({ episode, seriesTitle }: { episode: VideoEpisode; seriesTitle: string }) {
+  const videoRef = React.useRef<HTMLVideoElement | null>(null);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const hideTimerRef = React.useRef<number | null>(null);
+  const gestureRef = React.useRef<{ x: number; y: number; time: number; volume: number; brightness: number } | null>(null);
+  const [playing, setPlaying] = React.useState(false);
+  const [currentTime, setCurrentTime] = React.useState(0);
+  const [duration, setDuration] = React.useState(episode.duration || 0);
+  const [volume, setVolume] = React.useState(0.85);
+  const [brightness, setBrightness] = React.useState(1);
+  const [playbackRate, setPlaybackRate] = React.useState(1);
+  const [showControls, setShowControls] = React.useState(true);
+  const [isFullscreen, setIsFullscreen] = React.useState(false);
+  const [gestureHint, setGestureHint] = React.useState<string | null>(null);
+  const [resumeChoice, setResumeChoice] = React.useState<SavedVideoPlayback | null>(null);
+  const [audioTracks, setAudioTracks] = React.useState<Array<{ id: number; label: string; language?: string }>>([]);
+  const [activeAudioTrack, setActiveAudioTrack] = React.useState(0);
+  const src = episode.streamPath || `/api/videos/episodes/${episode.id}/stream`;
+
+  const saveVideoPlayback = React.useCallback((video = videoRef.current) => {
+    if (!video) return;
+    if (Number.isFinite(video.duration) && video.currentTime >= video.duration - 8) {
+      localStorage.removeItem(`${VIDEO_PLAYBACK_KEY}.${episode.id}`);
+      return;
+    }
+    writeStoredJson(`${VIDEO_PLAYBACK_KEY}.${episode.id}`, {
+      episodeId: episode.id,
+      currentTime: video.currentTime || 0,
+      duration: Number.isFinite(video.duration) ? video.duration : duration,
+      volume,
+      brightness,
+      playbackRate,
+      savedAt: Date.now(),
+    } satisfies SavedVideoPlayback);
+    writeStoredJson(`${VIDEO_PLAYBACK_KEY}.latest`, { episodeId: episode.id, savedAt: Date.now() });
+  }, [brightness, duration, episode.id, playbackRate, volume]);
+
+  const revealControls = React.useCallback(() => {
+    setShowControls(true);
+    if (hideTimerRef.current) window.clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = window.setTimeout(() => setShowControls(false), playing ? 3200 : 9000);
+  }, [playing]);
+
+  React.useEffect(() => {
+    const saved = readStoredJson<SavedVideoPlayback>(`${VIDEO_PLAYBACK_KEY}.${episode.id}`);
+    setResumeChoice(saved && saved.currentTime > 12 && saved.currentTime < (saved.duration || Infinity) - 12 ? saved : null);
+    setPlaying(false);
+    setCurrentTime(0);
+    setDuration(episode.duration || 0);
+    revealControls();
+  }, [episode.id, episode.duration, revealControls]);
+
+  React.useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = volume;
+    video.playbackRate = playbackRate;
+  }, [volume, playbackRate]);
+
+  React.useEffect(() => {
+    const onFullscreen = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onFullscreen);
+    return () => document.removeEventListener('fullscreenchange', onFullscreen);
+  }, []);
+
+  const play = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    revealControls();
+  };
+
+  const pause = () => {
+    videoRef.current?.pause();
+    setPlaying(false);
+    saveVideoPlayback();
+    revealControls();
+  };
+
+  const togglePlay = () => playing ? pause() : play();
+
+  const seekBy = (seconds: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = Math.max(0, Math.min((video.duration || duration || 0), video.currentTime + seconds));
+    setCurrentTime(video.currentTime);
+    saveVideoPlayback(video);
+    revealControls();
+  };
+
+  const seekTo = (value: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = value;
+    setCurrentTime(value);
+    saveVideoPlayback(video);
+  };
+
+  const toggleFullscreen = async () => {
+    if (!document.fullscreenElement) {
+      await containerRef.current?.requestFullscreen();
+      try {
+        await (screen.orientation as ScreenOrientation & { lock?: (orientation: string) => Promise<void> })?.lock?.('landscape');
+      } catch {}
+    } else {
+      await document.exitFullscreen();
+    }
+    revealControls();
+  };
+
+  const loadAudioTracks = () => {
+    const tracks = (videoRef.current as any)?.audioTracks;
+    if (!tracks || typeof tracks.length !== 'number') {
+      setAudioTracks([]);
+      return;
+    }
+    const next = Array.from({ length: tracks.length }, (_, index) => ({
+      id: index,
+      label: tracks[index].label || tracks[index].language || `Track ${index + 1}`,
+      language: tracks[index].language,
+    }));
+    setAudioTracks(next);
+    setActiveAudioTrack(Math.max(0, next.find(track => tracks[track.id]?.enabled)?.id || 0));
+  };
+
+  const selectAudioTrack = (id: number) => {
+    const tracks = (videoRef.current as any)?.audioTracks;
+    if (tracks) {
+      for (let index = 0; index < tracks.length; index++) tracks[index].enabled = index === id;
+    }
+    setActiveAudioTrack(id);
+    revealControls();
+  };
+
+  const applyResume = (mode: 'continue' | 'start') => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (mode === 'continue' && resumeChoice) {
+      setVolume(resumeChoice.volume ?? volume);
+      setBrightness(resumeChoice.brightness ?? brightness);
+      setPlaybackRate(resumeChoice.playbackRate ?? playbackRate);
+      video.currentTime = resumeChoice.currentTime;
+    } else {
+      video.currentTime = 0;
+      localStorage.removeItem(`${VIDEO_PLAYBACK_KEY}.${episode.id}`);
+    }
+    setResumeChoice(null);
+    play();
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    gestureRef.current = { x: event.clientX, y: event.clientY, time: videoRef.current?.currentTime || 0, volume, brightness };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    revealControls();
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = gestureRef.current;
+    const video = videoRef.current;
+    if (!start || !video) return;
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 24) {
+      const nextTime = Math.max(0, Math.min(video.duration || duration || 0, start.time + dx * 0.18));
+      video.currentTime = nextTime;
+      setCurrentTime(nextTime);
+      setGestureHint(`${dx > 0 ? '+' : ''}${Math.round(nextTime - start.time)}s`);
+    } else if (Math.abs(dy) > 24) {
+      const ratio = Math.max(0, Math.min(1, start.y - event.clientY) / Math.max(window.innerHeight * 0.45, 180));
+      if (event.clientX < window.innerWidth / 2) {
+        const nextBrightness = Math.max(0.35, Math.min(1.5, start.brightness + (dy < 0 ? ratio : -ratio)));
+        setBrightness(nextBrightness);
+        setGestureHint(`Brightness ${Math.round(nextBrightness * 100)}%`);
+      } else {
+        const nextVolume = Math.max(0, Math.min(1, start.volume + (dy < 0 ? ratio : -ratio)));
+        setVolume(nextVolume);
+        setGestureHint(`Volume ${Math.round(nextVolume * 100)}%`);
+      }
+    }
+  };
+
+  const handlePointerUp = () => {
+    gestureRef.current = null;
+    window.setTimeout(() => setGestureHint(null), 650);
+    saveVideoPlayback();
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className={`relative overflow-hidden rounded-xl border border-white/10 bg-black shadow-2xl ${isFullscreen ? 'fixed inset-0 z-[120] rounded-none border-0' : ''}`}
+      onMouseMove={revealControls}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+    >
+      <video
+        ref={videoRef}
+        src={src}
+        className={`w-full bg-black ${isFullscreen ? 'h-full object-contain' : 'aspect-video'}`}
+        style={{ filter: `brightness(${brightness})` }}
+        playsInline
+        onClick={togglePlay}
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          setDuration(video.duration || episode.duration || 0);
+          loadAudioTracks();
+        }}
+        onTimeUpdate={(event) => {
+          const video = event.currentTarget;
+          setCurrentTime(video.currentTime);
+          saveVideoPlayback(video);
+        }}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => {
+          setPlaying(false);
+          localStorage.removeItem(`${VIDEO_PLAYBACK_KEY}.${episode.id}`);
+          const latest = readStoredJson<{ episodeId: number }>(`${VIDEO_PLAYBACK_KEY}.latest`);
+          if (latest?.episodeId === episode.id) localStorage.removeItem(`${VIDEO_PLAYBACK_KEY}.latest`);
+        }}
+      />
+
+      {gestureHint && (
+        <div className="pointer-events-none absolute left-1/2 top-1/2 rounded-full bg-black/70 px-5 py-3 text-sm font-black text-white -translate-x-1/2 -translate-y-1/2">
+          {gestureHint}
+        </div>
+      )}
+
+      {resumeChoice && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70 p-6">
+          <div className="w-[min(420px,100%)] rounded-xl border border-white/10 bg-zinc-950 p-5 text-center">
+            <div className="text-xl font-black text-white">{seriesTitle}</div>
+            <div className="mt-1 text-sm font-bold text-zinc-400">{episode.title}</div>
+            <div className="mt-4 text-sm font-semibold text-zinc-300">Continue from {formatTime(resumeChoice.currentTime)}?</div>
+            <div className="mt-5 flex justify-center gap-3">
+              <button onClick={() => applyResume('continue')} className="rounded-full bg-brand-primary px-5 py-2 text-sm font-black text-black">Continue</button>
+              <button onClick={() => applyResume('start')} className="rounded-full bg-white/10 px-5 py-2 text-sm font-black text-white">Start Over</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/70 to-transparent p-4 transition-opacity ${showControls ? 'opacity-100' : 'pointer-events-none opacity-0'}`}>
+        <div className="mb-3 flex items-end justify-between gap-4">
+          <div className="min-w-0">
+            <div className="truncate text-lg font-black text-white">{seriesTitle}</div>
+            <div className="truncate text-sm font-bold text-zinc-300">S{episode.seasonNumber} E{episode.episodeNumber} - {episode.title}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => seekBy(-10)} className="rounded-full bg-white/10 p-2 text-white"><Rewind size={19} /></button>
+            <button onClick={togglePlay} className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-black">
+              {playing ? <Pause size={26} fill="black" /> : <Play size={26} fill="black" className="ml-1" />}
+            </button>
+            <button onClick={() => seekBy(10)} className="rounded-full bg-white/10 p-2 text-white"><FastForward size={19} /></button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3 text-xs font-bold text-zinc-300">
+          <span>{formatTime(currentTime)}</span>
+          <input aria-label="Seek video" type="range" min="0" max={duration || 0} step="0.1" value={Math.min(currentTime, duration || currentTime)} onChange={event => seekTo(Number(event.target.value))} className="h-1 flex-1 accent-brand-primary" />
+          <span>{formatTime(duration || 0)}</span>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Volume2 size={18} className="text-zinc-300" />
+            <input aria-label="Video volume" type="range" min="0" max="1" step="0.01" value={volume} onChange={event => setVolume(Number(event.target.value))} className="w-24 accent-brand-primary" />
+            <Sun size={18} className="text-zinc-300" />
+            <input aria-label="Video brightness" type="range" min="0.35" max="1.5" step="0.01" value={brightness} onChange={event => setBrightness(Number(event.target.value))} className="w-24 accent-brand-primary" />
+          </div>
+          <div className="flex items-center gap-2">
+            <select value={playbackRate} onChange={event => setPlaybackRate(Number(event.target.value))} className="rounded-full bg-white/10 px-3 py-2 text-xs font-black text-white outline-none">
+              {[0.5, 0.75, 1, 1.25, 1.5, 2].map(speed => <option key={speed} value={speed}>{speed}x</option>)}
+            </select>
+            <select value={activeAudioTrack} onChange={event => selectAudioTrack(Number(event.target.value))} className="rounded-full bg-white/10 px-3 py-2 text-xs font-black text-white outline-none" title="Language">
+              {audioTracks.length > 0
+                ? audioTracks.map(track => <option key={track.id} value={track.id}>{track.label}</option>)
+                : <option value={0}>Default audio</option>}
+            </select>
+            <button onClick={() => videoRef.current?.requestPictureInPicture?.()} className="rounded-full bg-white/10 p-2 text-white" aria-label="Picture in picture"><PictureInPicture2 size={18} /></button>
+            <button className="rounded-full bg-white/10 p-2 text-zinc-500" aria-label="Subtitles"><Subtitles size={18} /></button>
+            <button className="rounded-full bg-white/10 p-2 text-zinc-300" aria-label="Audio language"><Languages size={18} /></button>
+            <button onClick={toggleFullscreen} className="rounded-full bg-white/10 p-2 text-white" aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VideoPoster({ src, title }: { src?: string | null; title: string }) {
+  return (
+    <div className="aspect-[2/3] overflow-hidden rounded-lg bg-zinc-800">
+      {src ? (
+        <img src={src} alt={title} className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-zinc-600">
+          <Clapperboard size={46} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VideoThumb({ src, title }: { src?: string | null; title: string }) {
+  return (
+    <div className="aspect-video overflow-hidden rounded-md bg-zinc-800">
+      {src ? (
+        <img src={src} alt={title} className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-zinc-600">
+          <Play size={24} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function BrowseCard({ title, subtitle, cover, onClick, round = false }: BrowseCardProps) {
@@ -1491,16 +3262,53 @@ function FeatureTile({ icon, label, value, onClick }: { icon: React.ReactNode, l
   );
 }
 
+function StatTile({ label, value }: { label: string, value: string | number }) {
+  return (
+    <div className="rounded-2xl bg-white/[.05] p-4">
+      <div className="text-2xl font-black text-white">{value}</div>
+      <div className="mt-1 text-xs font-extrabold uppercase tracking-widest text-zinc-500">{label}</div>
+    </div>
+  );
+}
+
+function ToolCard({ icon, label, value }: { icon: React.ReactNode, label: string, value: string }) {
+  return (
+    <div className="rounded-2xl bg-white/[.05] p-4">
+      <div className="mb-3 text-brand-primary">{icon}</div>
+      <div className="text-sm font-extrabold">{label}</div>
+      <div className="mt-1 text-xs font-semibold text-zinc-400">{value}</div>
+    </div>
+  );
+}
+
+function MiniBars({ title, items }: { title: string, items: Array<{ label: string, value: number }> }) {
+  const max = Math.max(...items.map(item => item.value), 1);
+  return (
+    <div>
+      <div className="mb-3 text-xs font-extrabold uppercase tracking-widest text-zinc-500">{title}</div>
+      <div className="flex h-28 items-end gap-1 rounded-2xl bg-white/[.04] p-3">
+        {items.slice(0, 24).map((item, index) => (
+          <div key={`${item.label}-${index}`} className="flex min-w-0 flex-1 flex-col items-center gap-2">
+            <div className="w-full rounded-t bg-brand-primary/80" style={{ height: `${Math.max(8, (item.value / max) * 88)}px` }} />
+            <div className="max-w-full truncate text-[9px] font-bold text-zinc-500">{item.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface SongCardProps {
   song: Song;
   onClick: () => void;
   isActive: boolean;
   isPlaying: boolean;
+  onMoreOptions: () => void;
   onAddToPlaylist: (playlistId: number) => void;
   playlists: Playlist[];
 }
 
-function SongCard({ song, onClick, isActive, isPlaying, onAddToPlaylist, playlists }: SongCardProps) {
+function SongCard({ song, onClick, isActive, isPlaying, onMoreOptions, onAddToPlaylist, playlists }: SongCardProps) {
   const [showPlaylists, setShowPlaylists] = React.useState(false);
 
   return (
@@ -1531,6 +3339,13 @@ function SongCard({ song, onClick, isActive, isPlaying, onAddToPlaylist, playlis
           <p className="text-sm text-zinc-400 truncate">{song.artist}</p>
         </div>
         <div className="flex items-center space-x-1">
+          <button
+            onClick={(e) => { e.stopPropagation(); onMoreOptions(); }}
+            className="p-1 text-zinc-500 transition-colors hover:text-white"
+            aria-label="More options"
+          >
+            <MoreVertical size={17} />
+          </button>
           <div className="relative">
             <button 
               onClick={(e) => { e.stopPropagation(); setShowPlaylists(!showPlaylists); }}
@@ -1569,8 +3384,38 @@ function SongCard({ song, onClick, isActive, isPlaying, onAddToPlaylist, playlis
   );
 }
 
+function filteredSongsDuration(items: Song[]) {
+  return items.reduce((total, song) => total + (Number(song.duration) || 0), 0);
+}
+
+function rgbToHex(r: number, g: number, b: number) {
+  return `#${[r, g, b].map(value => value.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function shiftColor(hex: string, amount: number) {
+  const raw = hex.replace('#', '');
+  const next = [0, 2, 4].map(index => {
+    const value = parseInt(raw.slice(index, index + 2), 16);
+    return Math.max(0, Math.min(255, value + amount));
+  });
+  return rgbToHex(next[0], next[1], next[2]);
+}
+
+function contrastColor(hex: string) {
+  const raw = hex.replace('#', '');
+  const r = parseInt(raw.slice(0, 2), 16);
+  const g = parseInt(raw.slice(2, 4), 16);
+  const b = parseInt(raw.slice(4, 6), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 > 145 ? '#111111' : '#ffffff';
+}
+
 function formatTime(seconds: number) {
   if (isNaN(seconds)) return '0:00';
+  if (seconds >= 3600) {
+    const hours = Math.floor(seconds / 3600);
+    const min = Math.floor((seconds % 3600) / 60);
+    return `${hours}h ${min}m`;
+  }
   const min = Math.floor(seconds / 60);
   const sec = Math.floor(seconds % 60);
   return `${min}:${sec.toString().padStart(2, '0')}`;
